@@ -1,247 +1,178 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("time.h");
-    @cInclude("stdlib.h");
-    @cInclude("X11/Xlib.h");
-    @cInclude("GL/glx.h");
-});
+const rl = @import("raylib");
 
-const linux_display = c.Display;
-const linux_window = c.Window;
-const linux_glx_context = c.GLXContext;
-
-const x_event = c.XEvent;
-const x_key_event = c.XKeyEvent;
-const x_window_attributes = c.XWindowAttributes;
-
-const linux_state = struct
-{
-    Display: ?*linux_display,
-    Window: linux_window,
-    GC: linux_glx_context,
-
-    EventMask: i64,
+const Tileset = struct {
+    columns: u32,
+    tex: rl.Texture,
 };
 
-const button_state = struct
-{
-    WasDown: bool,
-    IsDown: bool,
-};
+const scaleFactor = 3;
+const mapWidthInTiles = 30;
+const mapHeightInTiles = 20;
+const screenWidth = mapWidthInTiles * 16 * scaleFactor;
+const screenHeight = mapHeightInTiles * 16 * scaleFactor;
 
+const framesSpeed = 5;
 
-const controller = struct
-{
-    const RightIndex = 0;
-    const LeftIndex = 1;
-    const UpIndex = 2;
-    const DownIndex = 3;
+pub fn main() !void {
+    rl.InitWindow(screenWidth, screenHeight, "twr-defns");
+//    rl.ToggleFullscreen();
+    rl.SetTargetFPS(60);
 
-    Buttons: [4]button_state,
-};
+    var ally = std.heap.page_allocator;
+    var parser = std.json.Parser.init(ally, false);
+    defer parser.deinit();
 
-const game_input = struct
-{
-    Controller: controller,
-    MouseX: u32,
-    MouseY: u32,
-    dTimeMS: f32,
-};
-
-const XKeyCodeEscape = 66;
-const XKeyCodeEnter = 36;
-const XKeyCodeSpace = 65;
-const XKeyCodeW = 25;
-const XKeyCodeA = 38;
-const XKeyCodeS = 39;
-const XKeyCodeD = 40;
-const XKeyCodeUp = 111;
-const XKeyCodeDown = 116;
-const XKeyCodeLeft = 113;
-const XKeyCodeRight = 114;
-
-var Running: bool = false;
-
-fn LinuxProcessButtonPress(XKey: x_key_event, BS: *button_state) callconv(.Inline) void
-{
-    if (XKey.type == c.KeyPress)
+    // Load tileset
+    var tileset: Tileset = undefined;
+    tileset.tex = rl.LoadTexture("assets/blowharder.png");
+    defer rl.UnloadTexture(tileset.tex);
     {
-        BS.*.IsDown = true;
-    }
-    else
-    {
-        BS.*.IsDown = false;
-    }
-}
+        const tilesetF = try std.fs.cwd().openFile("assets/blowharder.tsj", .{});
+        defer tilesetF.close();
+        var rawTilesetJSON = try tilesetF.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
+        defer ally.free(rawTilesetJSON);
 
-fn LinuxProcessKey(XKey: x_key_event, Controller: *controller) void
-{
-    switch(XKey.keycode)
-    {
-        XKeyCodeEscape =>
-        {
-            Running = false;
-        },
-        XKeyCodeD =>
-        {
-            LinuxProcessButtonPress(XKey, &Controller.*.Buttons[controller.RightIndex]);
-        },
-        XKeyCodeA =>
-        {
-            LinuxProcessButtonPress(XKey, &Controller.*.Buttons[controller.LeftIndex]);
-        },
-        XKeyCodeW =>
-        {
-            LinuxProcessButtonPress(XKey, &Controller.*.Buttons[controller.UpIndex]);
-        },
-        XKeyCodeS =>
-        {
-            LinuxProcessButtonPress(XKey, &Controller.*.Buttons[controller.DownIndex]);
-        },
-        else => {},
-    }
-}
+        var parsedTilesetData = try parser.parse(rawTilesetJSON);
 
-fn LinuxProcessEvents(LinuxState: *linux_state, Input: *game_input) void
-{
-    var WindowAttributes: x_window_attributes = undefined;
-    _ = c.XGetWindowAttributes(LinuxState.*.Display, LinuxState.*.Window, &WindowAttributes);
-
-    var Event: x_event = undefined;
-    while (c.XCheckWindowEvent(LinuxState.*.Display,
-            LinuxState.*.Window, LinuxState.*.EventMask, &Event) != 0)
-    {
-        switch (Event.type)
-        {
-            c.ConfigureNotify =>
-            {
-                c.glViewport(0, 0, @intCast(c_int, Event.xconfigure.width),
-                    @intCast(c_int, Event.xconfigure.height));
-            },
-            c.DestroyNotify =>
-            {
-                Running = false;
-            },
-            c.KeyRelease, c.KeyPress =>
-            {
-                LinuxProcessKey(Event.xkey, &Input.*.Controller);
-            },
-            c.MotionNotify =>
-            {
-                Input.*.MouseX = @intCast(u32, Event.xmotion.x);
-                Input.*.MouseY = @intCast(u32, Event.xmotion.y);
-            },
-            else => {},
-        }
-    }
-}
-
-fn LinuxGetTimeMS() callconv(.Inline) f32
-{
-    var Result: f32 = undefined;
-    Result = @intToFloat(f32, @divTrunc(c.clock(), c.CLOCKS_PER_SEC) * 1000);
-    return Result;
-}
-
-fn LinuxWaitForWindowToMap(LinuxState: *linux_state) void
-{
-    var Event: c.XEvent = undefined;
-    _ = c.XNextEvent(LinuxState.*.Display, &Event);
-    while (Event.type != c.MapNotify)
-    {
-        _ = c.XNextEvent(LinuxState.*.Display, &Event);
-    }
-}
-
-pub fn main() !void
-{
-    var LinuxState: linux_state = undefined;
-
-    const BufferWidth: u32 = 640;
-    const BufferHeight: u32 = 480;
-
-    const DefaultDisplay: ?*u8 = c.getenv("DISPLAY");
-    if (DefaultDisplay != null)
-    {
-        LinuxState.Display = c.XOpenDisplay(DefaultDisplay.?);
-    }
-    else
-    {
-        LinuxState.Display = c.XOpenDisplay(null);
+        const columnsValue = parsedTilesetData.root.Object.get("columns") orelse unreachable;
+        tileset.columns = @intCast(u32, columnsValue.Integer);
     }
 
-    if (LinuxState.Display != null)
+    // Load map data
+    var mapTileIndicies: [mapWidthInTiles * mapHeightInTiles]u32 = undefined;
+    var pathPoints = std.ArrayList(rl.Vector2).init(ally);
+    defer pathPoints.deinit();
     {
-        var AttributeList = [_]c_int{ c.GLX_RGBA, c.None };
-        const VisualInfo: ?*c.XVisualInfo = c.glXChooseVisual(LinuxState.Display,
-                        c.DefaultScreen(LinuxState.Display), @ptrCast(?*c_int, &AttributeList));
+        const mapDataF = try std.fs.cwd().openFile("assets/map1.tmj", .{});
+        defer mapDataF.close();
+        var mapDataJSON = try mapDataF.reader().readAllAlloc(ally, 1024 * 10);
+        defer ally.free(mapDataJSON);
 
-        LinuxState.GC = c.glXCreateContext(LinuxState.Display, VisualInfo, null, c.GL_TRUE);
-        if (LinuxState.GC == null)
-        {
-            std.debug.print("Failed to create glX context\n", .{});
-            unreachable;
+        parser.reset();
+        var parsedMapData = try parser.parse(mapDataJSON);
+        var layers = parsedMapData.root.Object.get("layers") orelse unreachable;
+
+        std.debug.assert(layers.Array.items.len == 2);
+
+        const tileIndiciesLayer = layers.Array.items[0];
+        const tileIndiciesData = tileIndiciesLayer.Object.get("data") orelse unreachable;
+        for (tileIndiciesData.Array.items) |tileIndex, tileIndexIndex| {
+            mapTileIndicies[tileIndexIndex] = @intCast(u32, tileIndex.Integer);
         }
 
-        LinuxState.EventMask =
-            c.StructureNotifyMask|c.KeyPressMask|c.KeyReleaseMask|c.PointerMotionMask;
+        const pathLayer = layers.Array.items[1];
+        const pathObjects = pathLayer.Object.get("objects") orelse unreachable;
+        for (pathObjects.Array.items) |pathPointValue| {
+            const xValue = pathPointValue.Object.get("x") orelse unreachable;
+            const yValue = pathPointValue.Object.get("y") orelse unreachable;
+            try pathPoints.append(rl.Vector2{
+                .x = switch (xValue) {
+                    .Float => |value| @floatCast(f32, value),
+                    .Integer => |value| @intToFloat(f32, value),
+                    else => unreachable,
+                },
+                .y = switch (yValue) {
+                    .Float => |value| @floatCast(f32, value),
+                    .Integer => |value| @intToFloat(f32, value),
+                    else => unreachable,
+                },
+            });
+        }
+    }
 
-        var SWA: c.XSetWindowAttributes = undefined;
-        SWA.colormap = c.XCreateColormap(LinuxState.Display, c.RootWindow(LinuxState.Display,
-                VisualInfo.?.screen), VisualInfo.?.visual, c.AllocNone);
-        SWA.border_pixel = 0;
-        SWA.event_mask = LinuxState.EventMask;
+    // Store FIRST animation index for each sprite in tile set.
+    // NOTE(caleb): There are 9 frames per index stored in this list. ( down anim, right anim, up anim )
+    //  where each animation is 3 frames.
+    var animTileIndicies = std.ArrayList(u32).init(ally);
+    defer animTileIndicies.deinit();
+    {
+        const animDataF = try std.fs.cwd().openFile("assets/anims.tmj", .{});
+        defer animDataF.close();
+        var rawAnimDataJSON = try animDataF.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
+        defer ally.free(rawAnimDataJSON);
 
-        LinuxState.Window = c.XCreateWindow(LinuxState.Display, c.RootWindow(LinuxState.Display, VisualInfo.?.screen),
-            0, 0, BufferWidth, BufferHeight, 0, VisualInfo.?.depth,
-            c.InputOutput,
-            VisualInfo.?.visual, c.CWBorderPixel|c.CWColormap|c.CWEventMask, &SWA
-        );
-
-        _ = c.XMapWindow(LinuxState.Display, LinuxState.Window);
-        LinuxWaitForWindowToMap(&LinuxState);
-        _ = c.glXMakeCurrent(LinuxState.Display, LinuxState.Window, LinuxState.GC);
-
-        var Input: game_input = undefined;
-        var OldController: controller = undefined;
-
-        var LastTimeMS: f32 = LinuxGetTimeMS();
-        const FPS = 60;
-        const TargetFrameTimeMS: f32 = 1000 / FPS;
-
-        Running = true;
-        while(Running)
-        {
-            const TimeNowMS = LinuxGetTimeMS();
-            const TimeSinceLastFrameMS = TimeNowMS - LastTimeMS;
-
-            if (TimeSinceLastFrameMS < TargetFrameTimeMS)
-            {
-                const TimeToSleepMS = (TargetFrameTimeMS - TimeSinceLastFrameMS);
-                std.time.sleep(@floatToInt(u64, TimeToSleepMS * 1000 * 1000));
+        parser.reset();
+        var parsedAnimData = try parser.parse(rawAnimDataJSON);
+        var layers = parsedAnimData.root.Object.get("layers") orelse unreachable;
+        for (layers.Array.items) |layer| {
+            var layerData = layer.Object.get("data") orelse unreachable;
+            for (layerData.Array.items) |tileIndexValue| {
+                try animTileIndicies.append(@intCast(u32, tileIndexValue.Integer));
             }
-            LastTimeMS = TimeNowMS;
-
-            LinuxProcessEvents(&LinuxState, &Input);
-            var ButtonIndex: u32 = 0;
-            while (ButtonIndex < Input.Controller.Buttons.len) : (ButtonIndex += 1)
-            {
-                if (OldController.Buttons[ButtonIndex].IsDown)
-                {
-                    Input.Controller.Buttons[ButtonIndex].WasDown = true;
-                }
-                else
-                {
-                    Input.Controller.Buttons[ButtonIndex].WasDown = false;
-                }
-            }
-            Input.dTimeMS = TimeSinceLastFrameMS;
-            OldController = Input.Controller;
-
-            // Draw
-            c.glClearColor(1.0, 1.0, 1.0, 1.0);
-            c.glClear(c.GL_COLOR_BUFFER_BIT);
-            c.glXSwapBuffers(LinuxState.Display, LinuxState.Window);
+            break;
         }
     }
+
+    var currentFrame: u8 = 0;
+    var framesCounter: u8 = 0;
+
+    // TODO(caleb): Disable escape key to close... ( why is this on by default? )
+    while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
+
+        // Update
+
+        framesCounter += 1;
+        if (framesCounter >= @divTrunc(60, framesSpeed)) {
+            framesCounter = 0;
+            currentFrame += 1;
+            if (currentFrame > 2) currentFrame = 0;
+        }
+
+        // Draw
+
+        rl.BeginDrawing();
+
+        rl.ClearBackground(rl.WHITE);
+
+        var tileY: u32 = 0;
+        while (tileY < mapHeightInTiles) : (tileY += 1) {
+            var tileX: u32 = 0;
+            while (tileX < mapWidthInTiles) : (tileX += 1) {
+                const mapTileIndex = mapTileIndicies[tileY * mapWidthInTiles + tileX];
+                const targetTileRow = @divTrunc(mapTileIndex, tileset.columns);
+                const targetTileColumn = @mod(mapTileIndex, tileset.columns) - 1;
+
+                const sourceRect = rl.Rectangle{
+                    .x = @intToFloat(f32, targetTileColumn * 16),
+                    .y = @intToFloat(f32, targetTileRow * 16),
+                    .width = 16,
+                    .height = 16,
+                };
+                const destRect = rl.Rectangle{
+                    .x = @intToFloat(f32, tileX * 16 * scaleFactor),
+                    .y = @intToFloat(f32, tileY * 16 * scaleFactor),
+                    .width = 16 * scaleFactor,
+                    .height = 16 * scaleFactor,
+                };
+
+                rl.DrawTexturePro(tileset.tex, sourceRect, destRect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+            }
+        }
+
+        const animTileIndex = animTileIndicies.items[21] + currentFrame + 3;
+        const targetTileRow = @divTrunc(animTileIndex, tileset.columns);
+        const targetTileColumn = @mod(animTileIndex, tileset.columns) - 1;
+
+        const sourceRect = rl.Rectangle{
+            .x = @intToFloat(f32, targetTileColumn * 16),
+            .y = @intToFloat(f32, targetTileRow * 16),
+            .width = 16,
+            .height = 16,
+        };
+        const destRect = rl.Rectangle{
+            .x = @intToFloat(f32, 5 * 16 * scaleFactor),
+            .y = @intToFloat(f32, 5 * 16 * scaleFactor),
+            .width = 16 * scaleFactor,
+            .height = 16 * scaleFactor,
+        };
+        rl.DrawTexturePro(tileset.tex, sourceRect, destRect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+
+        rl.DrawFPS(0, 0);
+
+        rl.EndDrawing();
+    }
+
+    // De-Initialization
+    rl.CloseWindow(); // Close window and OpenGL context
 }
