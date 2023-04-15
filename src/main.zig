@@ -6,18 +6,41 @@ const Tileset = struct {
     tex: rl.Texture,
 };
 
+const maxLayers = 5;
 const scaleFactor = 3;
-const mapWidthInTiles = 30;
-const mapHeightInTiles = 20;
-const screenWidth = mapWidthInTiles * 16 * scaleFactor;
-const screenHeight = mapHeightInTiles * 16 * scaleFactor;
+const mapWidthInTiles = 16;
+const mapHeightInTiles = 16;
+const spriteWidth = 32;
+const spriteHeight = 32;
+const screenWidth = mapWidthInTiles * spriteWidth * scaleFactor;
+const screenHeight = mapHeightInTiles * spriteHeight * scaleFactor;
 
-const framesSpeed = 5;
+const animFramesSpeed = 4;
+const tickSpeed = 1;
+
+fn isoTransform(x: f32, y: f32) rl.Vector2 {
+    const inputVec = rl.Vector2{.x = x, .y = y};
+    var out: rl.Vector2 = undefined;
+
+    const xTransVec = rl.Vector2{.x = @intToFloat(f32, spriteWidth * scaleFactor) * 0.5, .y = @intToFloat(f32, spriteHeight * scaleFactor) * 0.25 };
+    const yTransVec = rl.Vector2{.x = -1 * @intToFloat(f32, spriteWidth * scaleFactor) * 0.5, .y = @intToFloat(f32, spriteHeight * scaleFactor) * 0.25 };
+
+    out.x = inputVec.x * xTransVec.x + inputVec.y * yTransVec.x;
+    out.y = inputVec.x * xTransVec.y + inputVec.y * yTransVec.y;
+
+    return out;
+}
 
 pub fn main() !void {
     rl.InitWindow(screenWidth, screenHeight, "twr-defns");
+
 //    rl.ToggleFullscreen();
     rl.SetTargetFPS(60);
+
+    rl.InitAudioDevice();
+    defer rl.CloseAudioDevice();
+    rl.SetMasterVolume(1);
+//    bool IsAudioDeviceReady(void);
 
     var ally = std.heap.page_allocator;
     var parser = std.json.Parser.init(ally, false);
@@ -25,10 +48,10 @@ pub fn main() !void {
 
     // Load tileset
     var tileset: Tileset = undefined;
-    tileset.tex = rl.LoadTexture("assets/blowharder.png");
+    tileset.tex = rl.LoadTexture("assets/calebsprites/isosheet.png");
     defer rl.UnloadTexture(tileset.tex);
     {
-        const tilesetF = try std.fs.cwd().openFile("assets/blowharder.tsj", .{});
+        const tilesetF = try std.fs.cwd().openFile("assets/calebsprites/isosheet.tsj", .{});
         defer tilesetF.close();
         var rawTilesetJSON = try tilesetF.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
         defer ally.free(rawTilesetJSON);
@@ -40,11 +63,12 @@ pub fn main() !void {
     }
 
     // Load map data
-    var mapTileIndicies: [mapWidthInTiles * mapHeightInTiles]u32 = undefined;
-    var pathPoints = std.ArrayList(rl.Vector2).init(ally);
-    defer pathPoints.deinit();
+    var mapTileIndicies: [maxLayers][mapWidthInTiles * mapHeightInTiles]u32 = undefined;
+    var layerCount: usize = 0;
+//    var pathPoints = std.ArrayList(rl.Vector2).init(ally);
+//    defer pathPoints.deinit();
     {
-        const mapDataF = try std.fs.cwd().openFile("assets/map1.tmj", .{});
+        const mapDataF = try std.fs.cwd().openFile("assets/calebsprites/map1.tmj", .{});
         defer mapDataF.close();
         var mapDataJSON = try mapDataF.reader().readAllAlloc(ally, 1024 * 10);
         defer ally.free(mapDataJSON);
@@ -52,42 +76,42 @@ pub fn main() !void {
         parser.reset();
         var parsedMapData = try parser.parse(mapDataJSON);
         var layers = parsedMapData.root.Object.get("layers") orelse unreachable;
-
-        std.debug.assert(layers.Array.items.len == 2);
-
-        const tileIndiciesLayer = layers.Array.items[0];
-        const tileIndiciesData = tileIndiciesLayer.Object.get("data") orelse unreachable;
-        for (tileIndiciesData.Array.items) |tileIndex, tileIndexIndex| {
-            mapTileIndicies[tileIndexIndex] = @intCast(u32, tileIndex.Integer);
+        layerCount = layers.Array.items.len;
+        for (layers.Array.items) |layer, layerIndex|
+        {
+            const tileIndiciesData = layer.Object.get("data") orelse unreachable;
+            for (tileIndiciesData.Array.items) |tileIndex, tileIndexIndex| {
+                mapTileIndicies[layerIndex][tileIndexIndex] = @intCast(u32, tileIndex.Integer);
+            }
         }
 
-        const pathLayer = layers.Array.items[1];
-        const pathObjects = pathLayer.Object.get("objects") orelse unreachable;
-        for (pathObjects.Array.items) |pathPointValue| {
-            const xValue = pathPointValue.Object.get("x") orelse unreachable;
-            const yValue = pathPointValue.Object.get("y") orelse unreachable;
-            try pathPoints.append(rl.Vector2{
-                .x = switch (xValue) {
-                    .Float => |value| @floatCast(f32, value),
-                    .Integer => |value| @intToFloat(f32, value),
-                    else => unreachable,
-                },
-                .y = switch (yValue) {
-                    .Float => |value| @floatCast(f32, value),
-                    .Integer => |value| @intToFloat(f32, value),
-                    else => unreachable,
-                },
-            });
-        }
+//        const pathLayer = layers.Array.items[1];
+//        const pathObjects = pathLayer.Object.get("objects") orelse unreachable;
+//        for (pathObjects.Array.items) |pathPointValue| {
+//            const xValue = pathPointValue.Object.get("x") orelse unreachable;
+//            const yValue = pathPointValue.Object.get("y") orelse unreachable;
+//            try pathPoints.append(rl.Vector2{
+//                .x = switch (xValue) {
+//                    .Float => |value| @floatCast(f32, value),
+//                    .Integer => |value| @intToFloat(f32, value),
+//                    else => unreachable,
+//                },
+//                .y = switch (yValue) {
+//                    .Float => |value| @floatCast(f32, value),
+//                    .Integer => |value| @intToFloat(f32, value),
+//                    else => unreachable,
+//                },
+//            });
+//        }
     }
 
     // Store FIRST animation index for each sprite in tile set.
-    // NOTE(caleb): There are 9 frames per index stored in this list. ( down anim, right anim, up anim )
-    //  where each animation is 3 frames.
+    // NOTE(caleb): There are 4 animations stored per index in this list. ( up-left, up-right, down-left, down-right)
+    //  where each animation is 4 frames in length.
     var animTileIndicies = std.ArrayList(u32).init(ally);
     defer animTileIndicies.deinit();
     {
-        const animDataF = try std.fs.cwd().openFile("assets/anims.tmj", .{});
+        const animDataF = try std.fs.cwd().openFile("assets/calebsprites/anims.tmj", .{});
         defer animDataF.close();
         var rawAnimDataJSON = try animDataF.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
         defer ally.free(rawAnimDataJSON);
@@ -104,75 +128,107 @@ pub fn main() !void {
         }
     }
 
-    var currentFrame: u8 = 0;
-    var framesCounter: u8 = 0;
+    const sickJam = rl.LoadSound("assets/bigjjam.wav");
+    defer rl.UnloadSound(sickJam);
+
+    var animCurrentFrame: u8 = 0;
+    var animFramesCounter: u8 = 0;
+    var tickFrameCounter: u8 = 0;
+
+ //   var enemyPos = rl.Vector2{
 
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
-
-        // Update
-
-        framesCounter += 1;
-        if (framesCounter >= @divTrunc(60, framesSpeed)) {
-            framesCounter = 0;
-            currentFrame += 1;
-            if (currentFrame > 2) currentFrame = 0;
+        if (!rl.IsSoundPlaying(sickJam)) {// and rl.IsMusicReady(sickJam)) {
+            rl.PlaySound(sickJam);
         }
 
-        // Draw
+        animFramesCounter += 1;
+        if (animFramesCounter >= @divTrunc(60, animFramesSpeed)) {
+            animFramesCounter = 0;
+            animCurrentFrame += 1;
+            if (animCurrentFrame > 3) animCurrentFrame = 0; // NOTE(caleb): 3 is frames per animation - 1
+        }
+
+        tickFrameCounter += 1;
+        if (tickFrameCounter >= @divTrunc(60, tickSpeed)) {
+            tickFrameCounter = 0;
+            // Advance to next tile?
+        }
 
         rl.BeginDrawing();
+        rl.ClearBackground(rl.BLUE);
 
-        rl.ClearBackground(rl.WHITE);
+        var layerIndex: usize = 0;
+        while (layerIndex < layerCount) : (layerIndex += 1) {
+            var tileY: u32 = 0;
+            while (tileY < mapHeightInTiles) : (tileY += 1) {
+                var tileX: u32 = 0;
+                while (tileX < mapWidthInTiles) : (tileX += 1) {
+                    const mapTileIndex = mapTileIndicies[layerIndex][tileY * mapWidthInTiles + tileX];
+                    if (mapTileIndex == 0) {
+                        continue;
+                    }
+                    const targetTileRow = @divTrunc(mapTileIndex - 1, tileset.columns);
+                    const targetTileColumn = @mod(mapTileIndex - 1, tileset.columns);
 
-        var tileY: u32 = 0;
-        while (tileY < mapHeightInTiles) : (tileY += 1) {
-            var tileX: u32 = 0;
-            while (tileX < mapWidthInTiles) : (tileX += 1) {
-                const mapTileIndex = mapTileIndicies[tileY * mapWidthInTiles + tileX];
-                const targetTileRow = @divTrunc(mapTileIndex, tileset.columns);
-                const targetTileColumn = @mod(mapTileIndex, tileset.columns) - 1;
+                    var destPos = isoTransform(@intToFloat(f32, tileX), @intToFloat(f32, tileY));
 
-                const sourceRect = rl.Rectangle{
-                    .x = @intToFloat(f32, targetTileColumn * 16),
-                    .y = @intToFloat(f32, targetTileRow * 16),
-                    .width = 16,
-                    .height = 16,
-                };
-                const destRect = rl.Rectangle{
-                    .x = @intToFloat(f32, tileX * 16 * scaleFactor),
-                    .y = @intToFloat(f32, tileY * 16 * scaleFactor),
-                    .width = 16 * scaleFactor,
-                    .height = 16 * scaleFactor,
-                };
+                    // Handle screen offset
+                    destPos.x = (destPos.x + screenWidth / 2 - spriteWidth * scaleFactor / 2);
+                    destPos.y = (destPos.y + screenHeight / 4);
 
-                rl.DrawTexturePro(tileset.tex, sourceRect, destRect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+//                    destPos.x += @intToFloat(f32, tileX * 30);
+//                    destPos.y += @intToFloat(f32, tileY * 30);
+
+                    const destRect = rl.Rectangle{
+                        .x = destPos.x,
+                        .y = destPos.y,
+                        .width = spriteWidth * scaleFactor,
+                        .height = spriteHeight * scaleFactor,
+                    };
+                    const sourceRect = rl.Rectangle{
+                        .x = @intToFloat(f32, targetTileColumn * spriteWidth),
+                        .y = @intToFloat(f32, targetTileRow * spriteHeight),
+                        .width = spriteWidth,
+                        .height = spriteHeight,
+                    };
+
+                    rl.DrawTexturePro(tileset.tex, sourceRect, destRect, .{.x = 0, .y = 0}, 0, rl.WHITE);
+                }
             }
         }
 
-        const animTileIndex = animTileIndicies.items[21] + currentFrame + 3;
-        const targetTileRow = @divTrunc(animTileIndex, tileset.columns);
-        const targetTileColumn = @mod(animTileIndex, tileset.columns) - 1;
+        const animTileIndex = animTileIndicies.items[0] + 4 + animCurrentFrame;
+        std.debug.assert(animTileIndex != 0); // Has an anim?
+        const targetTileRow = @divTrunc(animTileIndex - 1, tileset.columns);
+        const targetTileColumn = @mod(animTileIndex - 1, tileset.columns);
 
-        const sourceRect = rl.Rectangle{
-            .x = @intToFloat(f32, targetTileColumn * 16),
-            .y = @intToFloat(f32, targetTileRow * 16),
-            .width = 16,
-            .height = 16,
-        };
+        var destPos = isoTransform(@intToFloat(f32, 1), @intToFloat(f32, 9));
+
+        // Handle screen offset
+        destPos.x = (destPos.x + screenWidth / 2 - spriteWidth * scaleFactor / 2);
+        destPos.y = (destPos.y + screenHeight / 4);
+
         const destRect = rl.Rectangle{
-            .x = @intToFloat(f32, 5 * 16 * scaleFactor),
-            .y = @intToFloat(f32, 5 * 16 * scaleFactor),
-            .width = 16 * scaleFactor,
-            .height = 16 * scaleFactor,
+            .x = destPos.x,
+            .y = destPos.y,
+            .width = spriteWidth * scaleFactor,
+            .height = spriteHeight * scaleFactor,
         };
+        const sourceRect = rl.Rectangle{
+            .x = @intToFloat(f32, targetTileColumn * spriteWidth),
+            .y = @intToFloat(f32, targetTileRow * spriteHeight),
+            .width = spriteWidth,
+            .height = spriteHeight,
+        };
+
         rl.DrawTexturePro(tileset.tex, sourceRect, destRect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
 
-        rl.DrawFPS(0, 0);
+        rl.DrawFPS(0, 0); // where is fps?
 
         rl.EndDrawing();
     }
 
-    // De-Initialization
-    rl.CloseWindow(); // Close window and OpenGL context
+    rl.CloseWindow();
 }
