@@ -1,0 +1,23 @@
+{ "columns":16,
+ "image":"isosheet.png",
+ "imageheight":192,
+ "imagewidth":512,
+ "margin":0,
+ "name":"isosheet",
+ "spacing":0,
+ "tilecount":96,
+ "tiledversion":"1.10.1",
+ "tileheight":32,
+ "tiles":[
+        {
+         "id":18,
+         "type":"track"
+        }, 
+        {
+         "id":19,
+         "type":"track_start"
+        }],
+ "tilewidth":32,
+ "type":"tileset",
+ "version":"1.10"
+}
