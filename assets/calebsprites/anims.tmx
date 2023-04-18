@@ -7,7 +7,7 @@
  <layer id="1" name="Tile Layer 1" width="1" height="2">
   <data encoding="csv">
 33,
-60
+49
 </data>
  </layer>
 </map>

@@ -1,37 +1,35 @@
 const std = @import("std");
 const rl = @import("raylib");
 
-const maxLayers = 5;
-const maxUniqueTrackTiles = 5;
-const scaleFactor = 3;
-const mapWidthInTiles = 16;
-const mapHeightInTiles = 16;
-const spriteWidth = 32;
-const spriteHeight = 32;
-const mapWidth = spriteWidth * mapWidthInTiles * scaleFactor;
-const mapHeight = @floatToInt(c_int, isoTransform(@intToFloat(f32, mapWidthInTiles),
-        @intToFloat(f32, mapHeightInTiles)).y);
+const max_layers = 5;
+const max_unique_track_tiles = 5;
+const scale_factor = 3;
+const map_width_in_tiles = 16;
+const map_height_in_tiles = 16;
+const sprite_width = 32;
+const sprite_height = 32;
+const map_width = sprite_width * map_width_in_tiles * scale_factor;
+const map_height = @floatToInt(c_int, isoTransform(@intToFloat(f32, map_width_in_tiles), @intToFloat(f32, map_height_in_tiles)).y) + sprite_height * scale_factor / 2;
 
 // TODO(caleb):
-// 1) Towers list and render from it instead of the map.
+
 // 2) ACTUALLY fix offsets for towers and enemies??? I could just offset by half sprite height ( that seems ok for now )
-// 3) Get towers rotating to face enemies.
 // 4) Fix sprite render order.
 
-const animFramesSpeed = 9;
-const enemyTPS = 5; // Enemy tiles per second
+const anim_frames_speed = 10;
+const enemy_tps = 2; // Enemy tiles per second
 
 const Tileset = struct {
     columns: u32,
-    trackStartID: u32,
-    tileIDCount: u8,
-    trackTileIDs: [maxUniqueTrackTiles]u32,
+    track_start_id: u32,
+    tile_id_count: u8,
+    track_tile_ids: [max_unique_track_tiles]u32, // This is silly..
     tex: rl.Texture,
 
-    pub fn checkIsTrackTile(self: Tileset, targetTileID: u32) bool {
-        var trackTileIndex: u8 = 0;
-        while (trackTileIndex < self.tileIDCount) : (trackTileIndex += 1) {
-            if (self.trackTileIDs[trackTileIndex] == targetTileID) {
+    pub fn checkIsTrackTile(self: Tileset, target_tile_id: u32) bool {
+        var track_tile_index: u8 = 0;
+        while (track_tile_index < self.tile_id_count) : (track_tile_index += 1) {
+            if (self.track_tile_ids[track_tile_index] == target_tile_id) {
                 return true;
             }
         }
@@ -40,7 +38,15 @@ const Tileset = struct {
 };
 
 const Map = struct {
-    tileIndicies: [maxLayers][mapWidthInTiles * mapHeightInTiles]u32,
+    tile_indicies: std.ArrayList(u32),
+    first_gid: u32,
+
+    pub fn tileIndexFromCoord(self: *Map, tile_x: u32, tile_y: u32) ?u32 {
+        std.debug.assert(tile_y * map_width_in_tiles + tile_x < self.*.tile_indicies.items.len);
+        const map_tile_index = self.*.tile_indicies.items[tile_y * map_width_in_tiles + tile_x];
+        return if (@intCast(i32, map_tile_index) - @intCast(i32, self.*.first_gid) < 0) null else
+            @intCast(u32, @intCast(i32, map_tile_index) - @intCast(i32, self.*.first_gid));
+    }
 };
 
 const Direction = enum(u32) {
@@ -53,97 +59,112 @@ const Direction = enum(u32) {
 const Enemy = struct {
     direction: Direction,
     pos: rl.Vector2,
-    prevPos: rl.Vector2,
+    prev_pos: rl.Vector2,
 };
 
-fn boundsCheck(x: i32, y: i32, dX: i32, dY: i32) callconv(.Inline) bool {
-    if ((y + dY < 0) or (y + dY >= mapHeightInTiles) or
-        (x + dX < 0) or (x + dX >= mapWidthInTiles)) {
-       return false;
+const Tower = struct {
+    direction: Direction,
+    tile_x: u32,
+    tile_y: u32,
+    anim_index: u32,
+    range: u32,
+};
+
+inline fn boundsCheck(x: i32, y: i32, dx: i32, dy: i32) bool {
+    if ((y + dy < 0) or (y + dy >= map_height_in_tiles) or
+        (x + dx < 0) or (x + dx >= map_width_in_tiles))
+    {
+        return false;
     }
     return true;
 }
 
-fn movingBackwards(x: f32, y: f32, prevX: f32, prevY: f32) callconv(.Inline) bool {
-    return ((x == prevX) and y == prevY);
+inline fn movingBackwards(x: f32, y: f32, prev_x: f32, prev_y: f32) bool {
+    return ((x == prev_x) and y == prev_y);
 }
 
 fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
-    var moveAmt = rl.Vector2{.x=0, .y=0};
+    var move_amt = rl.Vector2{ .x = 0, .y = 0 };
     switch (enemy.*.direction) {
-        .left => moveAmt.x -= 1,
-        .up => moveAmt.y -= 1,
-        .down => moveAmt.y += 1,
-        .right => moveAmt.x += 1,
+        .left => move_amt.x -= 1,
+        .up => move_amt.y -= 1,
+        .down => move_amt.y += 1,
+        .right => move_amt.x += 1,
     }
 
-    const tileX = @floatToInt(i32, @round(enemy.*.pos.x));
-    const tileY = @floatToInt(i32, @round(enemy.*.pos.y));
-    const tileDX = @floatToInt(i32, @round(moveAmt.x));
-    const tileDY = @floatToInt(i32, @round(moveAmt.y));
+    const tile_x = @floatToInt(i32, @round(enemy.*.pos.x));
+    const tile_y = @floatToInt(i32, @round(enemy.*.pos.y));
+    const tile_dx = @floatToInt(i32, @round(move_amt.x));
+    const tile_dy = @floatToInt(i32, @round(move_amt.y));
 
-    if (!boundsCheck(tileX, tileY, tileDX, tileDY)) {
+    if (!boundsCheck(tile_x, tile_y, tile_dx, tile_dy)) {
         return;
     }
 
-    const targetTileID = map.tileIndicies[0][@intCast(u32, tileY + tileDY) * mapWidthInTiles + @intCast(u32, tileX + tileDX)] - 1;
-    if (tileset.checkIsTrackTile(targetTileID) and !movingBackwards(enemy.*.pos.x + moveAmt.x, enemy.pos.y + moveAmt.y, enemy.*.prevPos.x, enemy.*.prevPos.y)) {
-        enemy.*.prevPos = enemy.*.pos;
-        enemy.*.pos.x += moveAmt.x;
-        enemy.*.pos.y += moveAmt.y;
-    }
-    else { // Choose new direction
+    const target_tile_id = map.tile_indicies.items[@intCast(u32, tile_y + tile_dy) * map_width_in_tiles + @intCast(u32, tile_x + tile_dx)] - 1;
+    if (tileset.checkIsTrackTile(target_tile_id) and !movingBackwards(enemy.*.pos.x + move_amt.x, enemy.pos.y + move_amt.y, enemy.*.prev_pos.x, enemy.*.prev_pos.y)) {
+        enemy.*.prev_pos = enemy.*.pos;
+        enemy.*.pos.x += move_amt.x;
+        enemy.*.pos.y += move_amt.y;
+    } else { // Choose new direction
         enemy.*.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.*.direction) + 1, @enumToInt(Direction.right) + 1));
         updateEnemy(tileset, map, enemy);
     }
 }
 
-const iIsoTrans = rl.Vector2{ .x = @intToFloat(f32, spriteWidth * scaleFactor) * 0.5, .y = @intToFloat(f32, spriteHeight * scaleFactor) * 0.25 };
-const jIsoTrans = rl.Vector2{ .x = -1 * @intToFloat(f32, spriteWidth * scaleFactor) * 0.5, .y = @intToFloat(f32, spriteHeight * scaleFactor) * 0.25 };
+const i_isometric_trans = rl.Vector2{ .x = @intToFloat(f32, sprite_width * scale_factor) * 0.5, .y = @intToFloat(f32, sprite_height * scale_factor) * 0.25 };
+const j_isometric_trans = rl.Vector2{ .x = -1 * @intToFloat(f32, sprite_width * scale_factor) * 0.5, .y = @intToFloat(f32, sprite_height * scale_factor) * 0.25 };
 
 fn isoTransform(x: f32, y: f32) rl.Vector2 {
-    const inputVec = rl.Vector2{ .x = x, .y = y };
-    var out: rl.Vector2 = undefined;
-
-    out.x = inputVec.x * iIsoTrans.x + inputVec.y * jIsoTrans.x;
-    out.y = inputVec.x * iIsoTrans.y + inputVec.y * jIsoTrans.y;
-
+    const input = rl.Vector2{ .x = x, .y = y };
+    var out = rl.Vector2{
+        .x = input.x * i_isometric_trans.x + input.y * j_isometric_trans.x,
+        .y = input.x * i_isometric_trans.y + input.y * j_isometric_trans.y,
+    };
     return out;
 }
 
 fn isoTransformWithScreenOffset(x: f32, y: f32) rl.Vector2 {
     var out = isoTransform(x, y);
 
-    const screenOffset = rl.Vector2{.x = @intToFloat(f32, rl.GetScreenWidth()) /  2 - spriteWidth * scaleFactor / 2,
-        .y = (@intToFloat(f32, rl.GetScreenHeight()) - @intToFloat(f32, mapHeight)) / 2};
+    const screen_offset = rl.Vector2{
+        .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - sprite_width * scale_factor / 2,
+        .y = (@intToFloat(f32, rl.GetScreenHeight()) - @intToFloat(f32, map_height)) / 2
+    };
 
-    out.x += screenOffset.x;
-    out.y += screenOffset.y;
+    out.x += screen_offset.x;
+    out.y += screen_offset.y;
 
     return out;
 }
 
 fn isoInvert(x: f32, y: f32) rl.Vector2 {
-    const screenOffset = rl.Vector2{.x = @intToFloat(f32, rl.GetScreenWidth()) /  2  - spriteWidth * scaleFactor / 2,
-        .y = (@intToFloat(f32, rl.GetScreenHeight()) - @intToFloat(f32, mapHeight)) / 2};
-    const inputVec = rl.Vector2{ .x = x - screenOffset.x, .y = y - screenOffset.y };
-    var out: rl.Vector2 = undefined;
+    const screen_offset = rl.Vector2{
+        .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - sprite_width * scale_factor / 2,
+        .y = (@intToFloat(f32, rl.GetScreenHeight()) - @intToFloat(f32, map_height)) / 2
+    };
 
-    const det = 1 / (iIsoTrans.x * jIsoTrans.y - jIsoTrans.x * iIsoTrans.y);
-    const iInvTrans = rl.Vector2{.x = jIsoTrans.y * det, .y = iIsoTrans.y * det * -1};
-    const jInvTrans = rl.Vector2{.x = jIsoTrans.x * det * -1, .y = iIsoTrans.x * det};
+    const input = rl.Vector2{
+        .x = x - screen_offset.x,
+        .y = y - screen_offset.y
+    };
 
-    out.x = inputVec.x * iInvTrans.x + inputVec.y * jInvTrans.x;
-    out.y = inputVec.x * iInvTrans.y + inputVec.y * jInvTrans.y;
+    const det = 1 / (i_isometric_trans.x * j_isometric_trans.y - j_isometric_trans.x * i_isometric_trans.y);
+    const i_invert_isometric_trans = rl.Vector2{ .x = j_isometric_trans.y * det, .y = i_isometric_trans.y * det * -1 };
+    const j_invert_isometric_trans = rl.Vector2{ .x = j_isometric_trans.x * det * -1, .y = i_isometric_trans.x * det };
 
-    return out;
+    return rl.Vector2{
+        .x = input.x * i_invert_isometric_trans.x + input.y * j_invert_isometric_trans.x,
+        .y = input.x * i_invert_isometric_trans.y + input.y * j_invert_isometric_trans.y,
+    };
 }
 
+
 pub fn main() !void {
-    rl.InitWindow(mapWidth, mapHeight, "twr-defns");
+    rl.InitWindow(map_width, map_height, "twr-defns");
     rl.SetWindowState(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE);
     rl.SetWindowState(rl.ConfigFlags.FLAG_VSYNC_HINT);
-    rl.SetWindowMinSize(mapWidth, mapHeight);
+    rl.SetWindowMinSize(map_width, map_height);
     rl.SetTargetFPS(60);
 
     rl.InitAudioDevice();
@@ -151,7 +172,9 @@ pub fn main() !void {
     rl.SetMasterVolume(1);
     //    bool IsAudioDeviceReady(void);
 
-    var ally = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var ally = arena.allocator();
     var parser = std.json.Parser.init(ally, false);
     defer parser.deinit();
 
@@ -160,228 +183,302 @@ pub fn main() !void {
     tileset.tex = rl.LoadTexture("assets/calebsprites/isosheet.png");
     defer rl.UnloadTexture(tileset.tex);
     {
-        const tilesetF = try std.fs.cwd().openFile("assets/calebsprites/isosheet.tsj", .{});
-        defer tilesetF.close();
-        var rawTilesetJSON = try tilesetF.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
-        defer ally.free(rawTilesetJSON);
+        const tileset_file = try std.fs.cwd().openFile("assets/calebsprites/isosheet.tsj", .{});
+        defer tileset_file.close();
+        var raw_tileset_json = try tileset_file.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
+        defer ally.free(raw_tileset_json);
 
-        var parsedTilesetData = try parser.parse(rawTilesetJSON);
+        var parsed_tileset_data = try parser.parse(raw_tileset_json);
 
-        const columnsValue = parsedTilesetData.root.Object.get("columns") orelse unreachable;
-        tileset.columns = @intCast(u32, columnsValue.Integer);
+        const columns_value = parsed_tileset_data.root.Object.get("columns") orelse unreachable;
+        tileset.columns = @intCast(u32, columns_value.Integer);
 
-        const tileData = parsedTilesetData.root.Object.get("tiles") orelse unreachable;
-        tileset.tileIDCount = @intCast(u8, tileData.Array.items.len);
-        for (tileData.Array.items) |tile, tileIndex| {
-            const tileID = tile.Object.get("id") orelse unreachable;
-            const tileType = tile.Object.get("type") orelse unreachable;
+        const tile_data = parsed_tileset_data.root.Object.get("tiles") orelse unreachable;
+        tileset.tile_id_count = @intCast(u8, tile_data.Array.items.len);
+        for (tile_data.Array.items) |tile, tile_index| {
+            const tile_id = tile.Object.get("id") orelse unreachable;
+            const tile_type = tile.Object.get("type") orelse unreachable;
 
-            if (std.mem.eql(u8, tileType.String, "track")) {
-                tileset.trackTileIDs[tileIndex] = @intCast(u32, tileID.Integer);
-            } else if (std.mem.eql(u8, tileType.String, "track_start")) {
-                tileset.trackTileIDs[tileIndex] = @intCast(u32, tileID.Integer);
-                tileset.trackStartID = @intCast(u32, tileID.Integer);
+            if (std.mem.eql(u8, tile_type.String, "track")) {
+                tileset.track_tile_ids[tile_index] = @intCast(u32, tile_id.Integer);
+            } else if (std.mem.eql(u8, tile_type.String, "track_start")) {
+                tileset.track_tile_ids[tile_index] = @intCast(u32, tile_id.Integer);
+                tileset.track_start_id = @intCast(u32, tile_id.Integer);
             } else {
                 unreachable;
             }
         }
     }
 
-    // Load map data
-    var map: Map = undefined;
-    for (map.tileIndicies) |*layer| {
-        for (layer.*) |*tileIndex| {
-            tileIndex.* = 0;
-        }
-    }
-
+    var board_map: Map = undefined;
+    board_map.tile_indicies = std.ArrayList(u32).init(ally);
+    defer board_map.tile_indicies.deinit();
     {
-        const mapDataF = try std.fs.cwd().openFile("assets/calebsprites/map1.tmj", .{});
-        defer mapDataF.close();
-        var mapDataJSON = try mapDataF.reader().readAllAlloc(ally, 1024 * 10);
-        defer ally.free(mapDataJSON);
+        const map_file = try std.fs.cwd().openFile("assets/calebsprites/map1.tmj", .{});
+        defer map_file.close();
+        var map_json = try map_file.reader().readAllAlloc(ally, 1024 * 10);
+        defer ally.free(map_json);
 
         parser.reset();
-        var parsedMapData = try parser.parse(mapDataJSON);
-        var layers = parsedMapData.root.Object.get("layers") orelse unreachable;
-        for (layers.Array.items) |layer, layerIndex| {
-            const tileIndiciesData = layer.Object.get("data") orelse unreachable;
-            for (tileIndiciesData.Array.items) |tileIndex, tileIndexIndex| {
-                map.tileIndicies[layerIndex][tileIndexIndex] = @intCast(u32, tileIndex.Integer);
-            }
+        var parsed_map = try parser.parse(map_json);
+        const layers = parsed_map.root.Object.get("layers") orelse unreachable;
+        std.debug.assert(layers.Array.items.len == 1);
+        const layer = layers.Array.items[0];
+        const tile_data = layer.Object.get("data") orelse unreachable;
+        for (tile_data.Array.items) |tile_index| {
+            try board_map.tile_indicies.append(@intCast(u32, tile_index.Integer));
         }
+
+        var tilesets = parsed_map.root.Object.get("tilesets") orelse unreachable;
+        std.debug.assert(tilesets.Array.items.len == 1);
+        const first_gid = tilesets.Array.items[0].Object.get("firstgid") orelse unreachable;
+        board_map.first_gid = @intCast(u32, first_gid.Integer);
     }
 
     // Store FIRST animation index for each sprite in tile set.
     // NOTE(caleb): There are 4 animations stored per index in this list. ( up-left, up-right, down-left, down-right)
     //  where each animation is 4 frames in length.
-    var animTileIndicies = std.ArrayList(u32).init(ally);
-    defer animTileIndicies.deinit();
+    var anim_map: Map = undefined;
+    anim_map.tile_indicies = std.ArrayList(u32).init(ally);
+    defer anim_map.tile_indicies.deinit();
     {
-        const animDataF = try std.fs.cwd().openFile("assets/calebsprites/anims.tmj", .{});
-        defer animDataF.close();
-        var rawAnimDataJSON = try animDataF.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
-        defer ally.free(rawAnimDataJSON);
+        const anim_file = try std.fs.cwd().openFile("assets/calebsprites/anims.tmj", .{});
+        defer anim_file.close();
+        var raw_anim_json = try anim_file.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
+        defer ally.free(raw_anim_json);
 
         parser.reset();
-        var parsedAnimData = try parser.parse(rawAnimDataJSON);
-        var layers = parsedAnimData.root.Object.get("layers") orelse unreachable;
-        for (layers.Array.items) |layer| {
-            var layerData = layer.Object.get("data") orelse unreachable;
-            for (layerData.Array.items) |tileIndexValue| {
-                try animTileIndicies.append(@intCast(u32, tileIndexValue.Integer));
-            }
-            break;
+        var parsed_anim = try parser.parse(raw_anim_json);
+        var layers = parsed_anim.root.Object.get("layers") orelse unreachable;
+        std.debug.assert(layers.Array.items.len == 1);
+        const layer = layers.Array.items[0];
+        var anim_data = layer.Object.get("data") orelse unreachable;
+        for (anim_data.Array.items) |tile_index| {
+            try anim_map.tile_indicies.append(@intCast(u32, tile_index.Integer));
         }
+
+        var tilesets = parsed_anim.root.Object.get("tilesets") orelse unreachable;
+        std.debug.assert(tilesets.Array.items.len == 1);
+        const first_gid = tilesets.Array.items[0].Object.get("firstgid") orelse unreachable;
+        anim_map.first_gid = @intCast(u32, first_gid.Integer);
     }
 
-    const sickJam = rl.LoadSound("assets/bigjjam.wav");
-    defer rl.UnloadSound(sickJam);
+    const jam = rl.LoadSound("assets/bigjjam.wav");
+    defer rl.UnloadSound(jam);
 
-    var animCurrentFrame: u8 = 0;
-    var animFramesCounter: u8 = 0;
-    var enemyTPSFrameCounter: u8 = 0;
+    var anim_current_frame: u8 = 0;
+    var anim_frames_counter: u8 = 0;
+    var enemy_tps_frame_counter: u8 = 0;
 
-    // Find start tile.
-    // NOTE(caleb): Spawn tile should allways be on layer 0
-    var startTileY: u32 = 0;
-    var startTileX: u32 = 0;
-    var foundStartTile = false;
-    outer: while (startTileY < mapHeightInTiles) : (startTileY += 1) {
-        startTileX = 0;
-        while (startTileX < mapWidthInTiles) : (startTileX += 1) {
-            const mapTileIndex = map.tileIndicies[0][startTileY * mapWidthInTiles + startTileX];
-            if (mapTileIndex == 0) {
-                continue;
-            }
-            if ((mapTileIndex - 1) == tileset.trackStartID) {
-                foundStartTile = true;
-                break :outer;
+    var enemy_start_tile_y: u32 = 0;
+    var enemy_start_tile_x: u32 = 0;
+    {
+        var found_enemy_start_tile = false;
+        outer: while (enemy_start_tile_y < map_height_in_tiles) : (enemy_start_tile_y += 1) {
+            enemy_start_tile_x = 0;
+            while (enemy_start_tile_x < map_width_in_tiles) : (enemy_start_tile_x += 1) {
+                const map_tile_index = board_map.tileIndexFromCoord(enemy_start_tile_x, enemy_start_tile_y) orelse continue;
+                if ((map_tile_index) == tileset.track_start_id) {
+                    found_enemy_start_tile = true;
+                    break :outer;
+                }
             }
         }
+        std.debug.assert(found_enemy_start_tile);
     }
-    std.debug.assert(foundStartTile);
 
-    var aliveEnemies = std.ArrayList(Enemy).init(ally);
-    defer aliveEnemies.deinit();
+    var towers = std.ArrayList(Tower).init(ally);
+    defer towers.deinit();
+
+    var alive_enemies = std.ArrayList(Enemy).init(ally);
+    defer alive_enemies.deinit();
 
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
-        if (!rl.IsSoundPlaying(sickJam)) { // and rl.IsMusicReady(sickJam)) {
-            rl.PlaySound(sickJam);
+        if (!rl.IsSoundPlaying(jam)) { // and rl.IsMusicReady(jam)) {
+            rl.PlaySound(jam);
         }
 
-        animFramesCounter += 1;
-        if (animFramesCounter >= @divTrunc(60, animFramesSpeed)) {
-            animFramesCounter = 0;
-            animCurrentFrame += 1;
-            if (animCurrentFrame > 3) animCurrentFrame = 0; // NOTE(caleb): 3 is frames per animation - 1
+        anim_frames_counter += 1;
+        if (anim_frames_counter >= @divTrunc(60, anim_frames_speed)) {
+            anim_frames_counter = 0;
+            anim_current_frame += 1;
+            if (anim_current_frame > 3) anim_current_frame = 0; // NOTE(caleb): 3 is frames per animation - 1
         }
 
-        enemyTPSFrameCounter += 1;
-        if (enemyTPSFrameCounter >= @divTrunc(60, enemyTPS)) {
-            enemyTPSFrameCounter = 0;
+        enemy_tps_frame_counter += 1;
+        if (enemy_tps_frame_counter >= @divTrunc(60, enemy_tps)) {
+            enemy_tps_frame_counter = 0;
 
             // Update enemies
 
-            for (aliveEnemies.items) |*enemy| {
-                updateEnemy(&tileset, &map, enemy);
+            for (alive_enemies.items) |*enemy| {
+                updateEnemy(&tileset, &board_map, enemy);
             }
 
-            if (aliveEnemies.items.len < 1) {
+            if (alive_enemies.items.len < 10) {
                 const newEnemy = Enemy{
                     .direction = Direction.left,
-                    .pos = rl.Vector2{ .x = @intToFloat(f32, startTileX), .y = @intToFloat(f32, startTileY) },
-                    .prevPos = rl.Vector2{ .x = @intToFloat(f32, startTileX), .y = @intToFloat(f32, startTileY) },
+                    .pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
+                    .prev_pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
                 };
-                try aliveEnemies.append(newEnemy);
+                try alive_enemies.append(newEnemy);
             }
         }
 
         // Get mouse position
-        var mousePos = rl.GetMousePosition();
-        var selectedTilePos = isoInvert(@round(mousePos.x), @round(mousePos.y));
-        const selectedTileX = @floatToInt(i32, selectedTilePos.x);
-        const selectedTileY = @floatToInt(i32, selectedTilePos.y);
+        var mouse_pos = rl.GetMousePosition();
+        var selected_tile_pos = isoInvert(@round(mouse_pos.x), @round(mouse_pos.y));
+        const selected_tile_x = @floatToInt(i32, selected_tile_pos.x);
+        const selected_tile_y = @floatToInt(i32, selected_tile_pos.y);
 
         // Place tower on selected tile
-        if (rl.IsMouseButtonPressed(rl.MouseButton.MOUSE_BUTTON_LEFT) and selectedTileX < mapWidthInTiles and selectedTileY < mapHeightInTiles and selectedTileX >= 0 and selectedTileY >= 0) {
-            map.tileIndicies[1][@intCast(u32, selectedTileY) * mapWidthInTiles + @intCast(u32, selectedTileX)] = animTileIndicies.items[1];
+        if (rl.IsMouseButtonPressed(rl.MouseButton.MOUSE_BUTTON_LEFT) and selected_tile_x < map_width_in_tiles and selected_tile_y < map_height_in_tiles and selected_tile_x >= 0 and selected_tile_y >= 0) {
+            var hasTower = false;
+            for (towers.items) |tower| {
+                if ((tower.tile_x == @intCast(u32, selected_tile_y)) and
+                    (tower.tile_y == @intCast(u32, selected_tile_x)))
+                {
+                    hasTower = true;
+                    break;
+                }
+            }
+            if (!hasTower) {
+                try towers.append(Tower{
+                    .direction = Direction.down,
+                    .tile_x = @intCast(u32, selected_tile_x),
+                    .tile_y = @intCast(u32, selected_tile_y),
+                    .anim_index = anim_map.tile_indicies.items[1] - anim_map.first_gid, // TODO(caleb): decide tower type...
+                    .range = 4,
+                });
+            }
+        }
+
+        // Tower lock on
+        for (towers.items) |*tower| {
+            const start_tile_x = @max(0, @intCast(i32, tower.tile_x) - @intCast(i32, @divTrunc(tower.range, 2)));
+            const start_tile_y = @max(0, @intCast(i32, tower.tile_y) - @intCast(i32, @divTrunc(tower.range, 2)));
+
+            var tile_y = start_tile_y;
+            while (tile_y < start_tile_y + @intCast(i32, tower.range)) : (tile_y += 1) {
+                var tile_x = start_tile_x;
+                while(tile_x < start_tile_x + @intCast(i32, tower.range)) : (tile_x += 1) {
+                    if ((tile_x > map_width_in_tiles) or (tile_y > map_height_in_tiles)) {
+                        continue;
+                    }
+
+                    const tile_index = board_map.tile_indicies.items[@intCast(u32, tile_y * map_width_in_tiles + tile_x)];
+                    if (tileset.checkIsTrackTile(tile_index)) {
+                        for (alive_enemies.items) |enemy| {
+                            const enemy_tile_x = @floatToInt(i32, @round(enemy.pos.x));
+                            const enemy_tile_y = @floatToInt(i32, @round(enemy.pos.y));
+                            if (tile_x == enemy_tile_x and tile_y == enemy_tile_y) {
+
+                                // lock onto this enemy.
+                                if (enemy_tile_y < tower.tile_y) {
+                                    tower.direction = Direction.up;
+                                }
+                                else if (enemy_tile_y == tower.tile_y and enemy_tile_x > tower.tile_x) {
+                                    tower.direction = Direction.right;
+                                }
+                                else if (enemy_tile_y > tower.tile_y) {
+                                    tower.direction = Direction.down;
+                                }
+                                else if (enemy_tile_y == tower.tile_y and enemy_tile_x < tower.tile_x) {
+                                    tower.direction = Direction.left;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         rl.BeginDrawing();
-        rl.ClearBackground(rl.Color{.r=77, .g=128, .b=201, .a=255});
+        rl.ClearBackground(rl.Color{ .r = 77, .g = 128, .b = 201, .a = 255 });
 
-        // Draw
-        for (map.tileIndicies) |layer, layerIndex| { // Do I actually need multi map layers??
-
-            // Draw enemies on layer 1
-            if (layerIndex == 1)
-            {
-                var enemyIndex = @intCast(i32, aliveEnemies.items.len) - 1;
-                while (enemyIndex >= 0) : (enemyIndex -= 1)  {
-                    const animTileIndex = animTileIndicies.items[0] + @enumToInt(aliveEnemies.items[@intCast(u32, enemyIndex)].direction) * 4 + animCurrentFrame;
-                    std.debug.assert(animTileIndex != 0); // Has an anim?
-                    const targetTileRow = @divTrunc(animTileIndex - 1, tileset.columns);
-                    const targetTileColumn = @mod(animTileIndex - 1, tileset.columns);
-
-                    var destPos = isoTransformWithScreenOffset(aliveEnemies.items[@intCast(u32, enemyIndex)].pos.x, aliveEnemies.items[@intCast(u32, enemyIndex)].pos.y);
-
-                    destPos.y -= spriteHeight * scaleFactor / 2;
-
-                    const destRect = rl.Rectangle{
-                        .x = destPos.x,
-                        .y = destPos.y,
-                        .width = spriteWidth * scaleFactor,
-                        .height = spriteHeight * scaleFactor,
-                    };
-                    const sourceRect = rl.Rectangle{
-                        .x = @intToFloat(f32, targetTileColumn * spriteWidth),
-                        .y = @intToFloat(f32, targetTileRow * spriteHeight),
-                        .width = spriteWidth,
-                        .height = spriteHeight,
-                    };
-
-                    rl.DrawTexturePro(tileset.tex, sourceRect, destRect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+        var tile_y: i32 = 0;
+        while (tile_y < map_height_in_tiles) : (tile_y += 1) {
+            var tile_x: i32 = 0;
+            while (tile_x < map_width_in_tiles) : (tile_x += 1) {
+                const map_tile_index = board_map.tileIndexFromCoord(@intCast(u32, tile_x), @intCast(u32, tile_y)) orelse continue;
+                var dest_pos = isoTransformWithScreenOffset(@intToFloat(f32, tile_x), @intToFloat(f32, tile_y));
+                if (tile_x == selected_tile_x and tile_y == selected_tile_y) {
+                    dest_pos.y -= 10;
                 }
+
+                const dest_rect = rl.Rectangle{
+                    .x = dest_pos.x,
+                    .y = dest_pos.y,
+                    .width = sprite_width * scale_factor,
+                    .height = sprite_height * scale_factor,
+                };
+
+                const target_tile_row = @divTrunc(map_tile_index, tileset.columns);
+                const target_tile_column = @mod(map_tile_index, tileset.columns);
+                const source_rect = rl.Rectangle{
+                    .x = @intToFloat(f32, target_tile_column * sprite_width),
+                    .y = @intToFloat(f32, target_tile_row * sprite_height),
+                    .width = sprite_width,
+                    .height = sprite_height,
+                };
+
+                rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
             }
+        }
 
-            // Draw map
-            var tileY: i32 = 0;
-            while (tileY < mapHeightInTiles) : (tileY += 1) {
-                var tileX: i32 = 0;
-                while (tileX < mapWidthInTiles) : (tileX += 1) {
-                    const mapTileIndex = layer[@intCast(u32, tileY) * mapWidthInTiles + @intCast(u32, tileX)];
-                    if (mapTileIndex == 0) {
-                        continue;
-                    }
-                    const targetTileRow = @divTrunc(mapTileIndex - 1, tileset.columns);
-                    const targetTileColumn = @mod(mapTileIndex - 1, tileset.columns);
+        for (towers.items) |tower| {
+            const anim_tile_index = tower.anim_index + @enumToInt(tower.direction) * 4 + anim_current_frame;
 
-                    var destPos = isoTransformWithScreenOffset(@intToFloat(f32, tileX),
-                        @intToFloat(f32, tileY));
+            var dest_pos = isoTransformWithScreenOffset(@intToFloat(f32, tower.tile_x), @intToFloat(f32, tower.tile_y));
 
-                    if (tileX == selectedTileX and tileY == selectedTileY) {
-                        destPos.y -= 10;
-                    }
+            dest_pos.y -= sprite_height * scale_factor / 2;
 
-                    const destRect = rl.Rectangle{
-                        .x = destPos.x,
-                        .y = destPos.y,
-                        .width = spriteWidth * scaleFactor,
-                        .height = spriteHeight * scaleFactor,
-                    };
+            const dest_rect = rl.Rectangle{
+                .x = dest_pos.x,
+                .y = dest_pos.y,
+                .width = sprite_width * scale_factor,
+                .height = sprite_height * scale_factor,
+            };
 
-                    const sourceRect = rl.Rectangle{
-                        .x = @intToFloat(f32, targetTileColumn * spriteWidth),
-                        .y = @intToFloat(f32, targetTileRow * spriteHeight),
-                        .width = spriteWidth,
-                        .height = spriteHeight,
-                    };
+            const target_tile_row = @divTrunc(anim_tile_index, tileset.columns);
+            const target_tile_column = @mod(anim_tile_index, tileset.columns);
+            const source_rect = rl.Rectangle{
+                .x = @intToFloat(f32, target_tile_column * sprite_width),
+                .y = @intToFloat(f32, target_tile_row * sprite_height),
+                .width = sprite_width,
+                .height = sprite_height,
+            };
 
-                    rl.DrawTexturePro(tileset.tex, sourceRect, destRect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-                }
-            }
+            rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+        }
+
+        // Draw enemies
+        var enemy_index = @intCast(i32, alive_enemies.items.len) - 1;
+        while (enemy_index >= 0) : (enemy_index -= 1) {
+            const anim_tile_index = anim_map.tile_indicies.items[0] + @enumToInt(alive_enemies.items[@intCast(u32, enemy_index)].direction) * 4 + anim_current_frame;
+            std.debug.assert(anim_tile_index != 0); // Has an anim?
+            const target_tile_row = @divTrunc(anim_tile_index - anim_map.first_gid, tileset.columns);
+            const target_tile_column = @mod(anim_tile_index - anim_map.first_gid, tileset.columns);
+
+            var dest_pos = isoTransformWithScreenOffset(alive_enemies.items[@intCast(u32, enemy_index)].pos.x, alive_enemies.items[@intCast(u32, enemy_index)].pos.y);
+
+            dest_pos.y -= sprite_height * scale_factor / 2;
+
+            const dest_rect = rl.Rectangle{
+                .x = dest_pos.x,
+                .y = dest_pos.y,
+                .width = sprite_width * scale_factor,
+                .height = sprite_height * scale_factor,
+            };
+            const source_rect = rl.Rectangle{
+                .x = @intToFloat(f32, target_tile_column * sprite_width),
+                .y = @intToFloat(f32, target_tile_row * sprite_height),
+                .width = sprite_width,
+                .height = sprite_height,
+            };
+
+            rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
         }
 
         rl.EndDrawing();
