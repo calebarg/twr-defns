@@ -16,7 +16,8 @@ const map_height = @floatToInt(c_int, isoTransform(@intToFloat(f32, map_width_in
 // *Write sorting algo for enemies. ( Also towers? )
 
 const anim_frames_speed = 10;
-const enemy_tps = 10; // Enemy tiles per second
+const enemy_tps = 0.3; // Enemy tiles per second
+const tower_dps = 1;
 
 const Tileset = struct {
     columns: u32,
@@ -56,6 +57,7 @@ const Direction = enum(u32) {
 
 const Enemy = struct {
     direction: Direction,
+    hp: i32,
     pos: rl.Vector2,
     prev_pos: rl.Vector2,
 };
@@ -66,6 +68,7 @@ const Tower = struct {
     tile_y: u32,
     anim_index: u32,
     range: u32,
+    dmg: u32,
 };
 
 const DrawBufferEntry = struct {
@@ -270,6 +273,7 @@ pub fn main() !void {
     var anim_current_frame: u8 = 0;
     var anim_frames_counter: u8 = 0;
     var enemy_tps_frame_counter: u8 = 0;
+    var tower_dps_frame_counter: u8 = 0;
 
     var enemy_start_tile_y: u32 = 0;
     var enemy_start_tile_x: u32 = 0;
@@ -293,6 +297,9 @@ pub fn main() !void {
 
     var alive_enemies = std.ArrayList(Enemy).init(ally);
     defer alive_enemies.deinit();
+
+    var dead_enemies = std.ArrayList(Enemy).init(ally);
+    defer dead_enemies.deinit();
 
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
@@ -322,6 +329,7 @@ pub fn main() !void {
                     .direction = Direction.left,
                     .pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
                     .prev_pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
+                    .hp = 1,
                 };
                 try alive_enemies.append(newEnemy);
             }
@@ -357,8 +365,11 @@ pub fn main() !void {
                         .direction = Direction.down,
                         .tile_x = @intCast(u32, selected_tile_x),
                         .tile_y = @intCast(u32, selected_tile_y),
-                        .anim_index = anim_map.tile_indicies.items[1], // TODO(caleb): decide tower type...
+
+                        // TODO(caleb): decide tower type...
+                        .anim_index = anim_map.tile_indicies.items[1],
                         .range = 4,
+                        .dmg = 1,
                     };
                     var did_insert_tower = false;
                     for (towers.items) |tower, tower_index| {
@@ -375,32 +386,49 @@ pub fn main() !void {
             }
         }
 
-        // Have each tower choose an enemy to attack
-        for (towers.items) |*tower| {
-            const tower_x = @intCast(i32, tower.tile_x);
-            const tower_y = @intCast(i32, tower.tile_y);
+        tower_dps_frame_counter += 1;
+        if (tower_dps_frame_counter >= @divTrunc(60, tower_dps)) {
+            tower_dps_frame_counter = 0;
 
-            for (alive_enemies.items) |enemy| {
-                const enemy_tile_x = @floatToInt(i32, @round(enemy.pos.x));
-                const enemy_tile_y = @floatToInt(i32, @round(enemy.pos.y));
+            // Update each tower
+            for (towers.items) |*tower| {
+                const tower_x = @intCast(i32, tower.tile_x);
+                const tower_y = @intCast(i32, tower.tile_y);
 
-                // Enemy distance < tower range
-                if ((enemy_tile_x - tower_x) * (enemy_tile_x - tower_x) +
-                    (enemy_tile_y - tower_y) * (enemy_tile_y - tower_y) <=
-                    (@intCast(i32, tower.range * tower.range)))
-                {
-                    if (enemy_tile_y < tower.tile_y) {
-                        tower.direction = Direction.up;
-                    } else if (enemy_tile_y == tower.tile_y and enemy_tile_x > tower.tile_x) {
-                        tower.direction = Direction.right;
-                    } else if (enemy_tile_y > tower.tile_y) {
-                        tower.direction = Direction.down;
-                    } else if (enemy_tile_y == tower.tile_y and enemy_tile_x < tower.tile_x) {
-                        tower.direction = Direction.left;
+                for (alive_enemies.items) |*enemy| {
+                    const enemy_tile_x = @floatToInt(i32, @round(enemy.pos.x));
+                    const enemy_tile_y = @floatToInt(i32, @round(enemy.pos.y));
+
+                    // Enemy distance < tower range
+                    if ((enemy_tile_x - tower_x) * (enemy_tile_x - tower_x) +
+                        (enemy_tile_y - tower_y) * (enemy_tile_y - tower_y) <=
+                        (@intCast(i32, tower.range * tower.range)))
+                    {
+                        if (enemy_tile_y < tower.tile_y) {
+                            tower.direction = Direction.up;
+                        } else if (enemy_tile_y == tower.tile_y and enemy_tile_x > tower.tile_x) {
+                            tower.direction = Direction.right;
+                        } else if (enemy_tile_y > tower.tile_y) {
+                            tower.direction = Direction.down;
+                        } else if (enemy_tile_y == tower.tile_y and enemy_tile_x < tower.tile_x) {
+                            tower.direction = Direction.left;
+                        }
+
+                        // TODO(caleb): Towers can be smarter than just finding the "first"
+                        //   in range enemy..
+                        enemy.hp -= @intCast(i32, tower.dmg);
+                        break;
                     }
-                    // TODO(caleb): Towers can be smarter than just finding the "first"
-                    //   in range enemy..
-                    break;
+                }
+            }
+        }
+
+        {
+            var enemy_index: i32 = 0;
+            while (enemy_index < alive_enemies.items.len) : (enemy_index += 1) {
+                if (alive_enemies.items[@intCast(u32, enemy_index)].hp <= 0) {
+                    try dead_enemies.append(alive_enemies.orderedRemove(@intCast(u32, enemy_index)));
+                    enemy_index -= 1;
                 }
             }
         }
@@ -470,7 +498,7 @@ pub fn main() !void {
                 added_entries += 1;
             }
 
-            for (new_entries[0 .. added_entries]) |new_entry| {
+            for (new_entries[0..added_entries]) |new_entry| {
                 var did_insert_entry = false;
                 for (draw_list.items) |draw_list_entry, curr_entry_index| {
                     if (new_entry.tile_pos.y < draw_list_entry.tile_pos.y) {
