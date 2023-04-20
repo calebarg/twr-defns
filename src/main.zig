@@ -16,7 +16,7 @@ const map_height = @floatToInt(c_int, isoTransform(@intToFloat(f32, map_width_in
 // *Write sorting algo for enemies. ( Also towers? )
 
 const anim_frames_speed = 10;
-const enemy_tps = 0.3; // Enemy tiles per second
+const enemy_tps = 3; // Enemy tiles per second
 const tower_dps = 1;
 
 const Tileset = struct {
@@ -169,8 +169,7 @@ pub fn main() !void {
 
     rl.InitAudioDevice();
     defer rl.CloseAudioDevice();
-    rl.SetMasterVolume(1);
-    //    bool IsAudioDeviceReady(void);
+    rl.SetMasterVolume(0.1);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -181,6 +180,12 @@ pub fn main() !void {
     var push_buffer = try ally.alloc(u8, 1024 * 10);
     defer ally.free(push_buffer);
     var fba = std.heap.FixedBufferAllocator.init(push_buffer);
+
+    var jam = rl.LoadMusicStream("assets/grasslands.wav");
+    jam.looping = true;
+    defer rl.UnloadMusicStream(jam);
+
+    rl.PlayMusicStream(jam);
 
     // Load tileset
     var tileset: Tileset = undefined;
@@ -267,8 +272,6 @@ pub fn main() !void {
         anim_map.first_gid = @intCast(u32, first_gid.Integer);
     }
 
-    const jam = rl.LoadSound("assets/bigjjam.wav");
-    defer rl.UnloadSound(jam);
 
     var anim_current_frame: u8 = 0;
     var anim_frames_counter: u8 = 0;
@@ -303,9 +306,7 @@ pub fn main() !void {
 
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
-        if (!rl.IsSoundPlaying(jam)) { // and rl.IsMusicReady(jam)) {
-            rl.PlaySound(jam);
-        }
+        rl.UpdateMusicStream(jam);
 
         anim_frames_counter += 1;
         if (anim_frames_counter >= @divTrunc(60, anim_frames_speed)) {
@@ -324,12 +325,12 @@ pub fn main() !void {
                 updateEnemy(&tileset, &board_map, enemy);
             }
 
-            if (alive_enemies.items.len < 100) {
+            if (alive_enemies.items.len < 5) {
                 const newEnemy = Enemy{
                     .direction = Direction.left,
                     .pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
                     .prev_pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
-                    .hp = 1,
+                    .hp = 10,
                 };
                 try alive_enemies.append(newEnemy);
             }
@@ -387,32 +388,33 @@ pub fn main() !void {
         }
 
         tower_dps_frame_counter += 1;
-        if (tower_dps_frame_counter >= @divTrunc(60, tower_dps)) {
-            tower_dps_frame_counter = 0;
 
-            // Update each tower
-            for (towers.items) |*tower| {
-                const tower_x = @intCast(i32, tower.tile_x);
-                const tower_y = @intCast(i32, tower.tile_y);
+        // Update each tower
+        for (towers.items) |*tower| {
+            const tower_x = @intCast(i32, tower.tile_x);
+            const tower_y = @intCast(i32, tower.tile_y);
 
-                for (alive_enemies.items) |*enemy| {
-                    const enemy_tile_x = @floatToInt(i32, @round(enemy.pos.x));
-                    const enemy_tile_y = @floatToInt(i32, @round(enemy.pos.y));
+            for (alive_enemies.items) |*enemy| {
+                const enemy_tile_x = @floatToInt(i32, @round(enemy.pos.x));
+                const enemy_tile_y = @floatToInt(i32, @round(enemy.pos.y));
 
-                    // Enemy distance < tower range
-                    if ((enemy_tile_x - tower_x) * (enemy_tile_x - tower_x) +
-                        (enemy_tile_y - tower_y) * (enemy_tile_y - tower_y) <=
-                        (@intCast(i32, tower.range * tower.range)))
-                    {
-                        if (enemy_tile_y < tower.tile_y) {
-                            tower.direction = Direction.up;
-                        } else if (enemy_tile_y == tower.tile_y and enemy_tile_x > tower.tile_x) {
-                            tower.direction = Direction.right;
-                        } else if (enemy_tile_y > tower.tile_y) {
-                            tower.direction = Direction.down;
-                        } else if (enemy_tile_y == tower.tile_y and enemy_tile_x < tower.tile_x) {
-                            tower.direction = Direction.left;
-                        }
+                // Enemy distance < tower range
+                if ((enemy_tile_x - tower_x) * (enemy_tile_x - tower_x) +
+                    (enemy_tile_y - tower_y) * (enemy_tile_y - tower_y) <=
+                    (@intCast(i32, tower.range * tower.range)))
+                {
+                    if (enemy_tile_y < tower.tile_y and enemy_tile_x == tower.tile_x) {
+                        tower.direction = Direction.up;
+                    } else if (enemy_tile_x > tower.tile_x) {
+                        tower.direction = Direction.right;
+                    } else if (enemy_tile_y > tower.tile_y and enemy_tile_x == tower.tile_x) {
+                        tower.direction = Direction.down;
+                    } else if (enemy_tile_x < tower.tile_x) {
+                        tower.direction = Direction.left;
+                    }
+
+                    if (tower_dps_frame_counter >= @divTrunc(60, tower_dps)) {
+                        tower_dps_frame_counter = 0;
 
                         // TODO(caleb): Towers can be smarter than just finding the "first"
                         //   in range enemy..
