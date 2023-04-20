@@ -1,6 +1,8 @@
 const std = @import("std");
 const rl = @import("raylib");
+const rlm = @import("raylib-math");
 
+const projectile_speed = 0.3;
 const max_layers = 5;
 const max_unique_track_tiles = 5;
 const scale_factor = 3;
@@ -13,11 +15,12 @@ const map_height = @floatToInt(c_int, isoTransform(@intToFloat(f32, map_width_in
 
 // TODO(caleb):
 // *ACTUALLY fix offsets for towers and enemies. Rn I just offset by half sprite's display height ( not ideal )
-// *Write sorting algo for enemies. ( Also towers? )
+// *Assign entities screen coords. ( not tile coords )
+// *fix projectile rect's angle
 
 const anim_frames_speed = 10;
 const enemy_tps = 3; // Enemy tiles per second
-const tower_dps = 1;
+const tower_pps = 1; // Projectiles per second
 
 const Tileset = struct {
     columns: u32,
@@ -64,11 +67,19 @@ const Enemy = struct {
 
 const Tower = struct {
     direction: Direction,
-    tile_x: u32,
+    tile_x: u32, // TODO(caleb): pos
     tile_y: u32,
     anim_index: u32,
     range: u32,
-    dmg: u32,
+    damage: u32,
+};
+
+const Projectile = struct {
+    direction: rl.Vector2,
+    angle: f32,
+    speed: f32,
+    pos: rl.Vector2,
+    tower: *Tower, // NOTE(caleb): Carefull not to create dangling pointers here...
 };
 
 const DrawBufferEntry = struct {
@@ -189,10 +200,10 @@ pub fn main() !void {
 
     // Load tileset
     var tileset: Tileset = undefined;
-    tileset.tex = rl.LoadTexture("assets/calebsprites/isosheet.png");
+    tileset.tex = rl.LoadTexture("assets/isosheet.png");
     defer rl.UnloadTexture(tileset.tex);
     {
-        const tileset_file = try std.fs.cwd().openFile("assets/calebsprites/isosheet.tsj", .{});
+        const tileset_file = try std.fs.cwd().openFile("assets/isosheet.tsj", .{});
         defer tileset_file.close();
         var raw_tileset_json = try tileset_file.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
         defer ally.free(raw_tileset_json);
@@ -223,7 +234,7 @@ pub fn main() !void {
     board_map.tile_indicies = std.ArrayList(u32).init(ally);
     defer board_map.tile_indicies.deinit();
     {
-        const map_file = try std.fs.cwd().openFile("assets/calebsprites/map1.tmj", .{});
+        const map_file = try std.fs.cwd().openFile("assets/map1.tmj", .{});
         defer map_file.close();
         var map_json = try map_file.reader().readAllAlloc(ally, 1024 * 10);
         defer ally.free(map_json);
@@ -251,7 +262,7 @@ pub fn main() !void {
     anim_map.tile_indicies = std.ArrayList(u32).init(ally);
     defer anim_map.tile_indicies.deinit();
     {
-        const anim_file = try std.fs.cwd().openFile("assets/calebsprites/anims.tmj", .{});
+        const anim_file = try std.fs.cwd().openFile("assets/anims.tmj", .{});
         defer anim_file.close();
         var raw_anim_json = try anim_file.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
         defer ally.free(raw_anim_json);
@@ -272,11 +283,10 @@ pub fn main() !void {
         anim_map.first_gid = @intCast(u32, first_gid.Integer);
     }
 
-
     var anim_current_frame: u8 = 0;
     var anim_frames_counter: u8 = 0;
     var enemy_tps_frame_counter: u8 = 0;
-    var tower_dps_frame_counter: u8 = 0;
+    var tower_pps_frame_counter: u32 = 0;
 
     var enemy_start_tile_y: u32 = 0;
     var enemy_start_tile_x: u32 = 0;
@@ -303,6 +313,9 @@ pub fn main() !void {
 
     var dead_enemies = std.ArrayList(Enemy).init(ally);
     defer dead_enemies.deinit();
+
+    var projectiles = std.ArrayList(Projectile).init(ally);
+    defer projectiles.deinit();
 
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
@@ -370,7 +383,7 @@ pub fn main() !void {
                         // TODO(caleb): decide tower type...
                         .anim_index = anim_map.tile_indicies.items[1],
                         .range = 4,
-                        .dmg = 1,
+                        .damage = 1,
                     };
                     var did_insert_tower = false;
                     for (towers.items) |tower, tower_index| {
@@ -387,41 +400,80 @@ pub fn main() !void {
             }
         }
 
-        tower_dps_frame_counter += 1;
+        tower_pps_frame_counter += 1; // do this a per tower basis
+        if (tower_pps_frame_counter >= @divTrunc(60, tower_pps)) {
+            tower_pps_frame_counter = 0;
 
-        // Update each tower
-        for (towers.items) |*tower| {
-            const tower_x = @intCast(i32, tower.tile_x);
-            const tower_y = @intCast(i32, tower.tile_y);
+            // Update each tower
+            for (towers.items) |*tower| {
+                const tower_x = @intCast(i32, tower.tile_x);
+                const tower_y = @intCast(i32, tower.tile_y);
 
-            for (alive_enemies.items) |*enemy| {
-                const enemy_tile_x = @floatToInt(i32, @round(enemy.pos.x));
-                const enemy_tile_y = @floatToInt(i32, @round(enemy.pos.y));
+                for (alive_enemies.items) |*enemy| {
+                    const enemy_tile_x = @floatToInt(i32, @round(enemy.pos.x));
+                    const enemy_tile_y = @floatToInt(i32, @round(enemy.pos.y));
 
-                // Enemy distance < tower range
-                if ((enemy_tile_x - tower_x) * (enemy_tile_x - tower_x) +
-                    (enemy_tile_y - tower_y) * (enemy_tile_y - tower_y) <=
-                    (@intCast(i32, tower.range * tower.range)))
-                {
-                    if (enemy_tile_y < tower.tile_y and enemy_tile_x == tower.tile_x) {
-                        tower.direction = Direction.up;
-                    } else if (enemy_tile_x > tower.tile_x) {
-                        tower.direction = Direction.right;
-                    } else if (enemy_tile_y > tower.tile_y and enemy_tile_x == tower.tile_x) {
-                        tower.direction = Direction.down;
-                    } else if (enemy_tile_x < tower.tile_x) {
-                        tower.direction = Direction.left;
-                    }
+                    // Enemy distance < tower range
+                    if ((enemy_tile_x - tower_x) * (enemy_tile_x - tower_x) +
+                        (enemy_tile_y - tower_y) * (enemy_tile_y - tower_y) <=
+                        (@intCast(i32, tower.range * tower.range)))
+                    {
+                        if (enemy_tile_y < tower.tile_y and enemy_tile_x == tower.tile_x) {
+                            tower.direction = Direction.up;
+                        } else if (enemy_tile_x > tower.tile_x) {
+                            tower.direction = Direction.right;
+                        } else if (enemy_tile_y > tower.tile_y and enemy_tile_x == tower.tile_x) {
+                            tower.direction = Direction.down;
+                        } else if (enemy_tile_x < tower.tile_x) {
+                            tower.direction = Direction.left;
+                        }
 
-                    if (tower_dps_frame_counter >= @divTrunc(60, tower_dps)) {
-                        tower_dps_frame_counter = 0;
+                        const tower_pos = rl.Vector2{
+                            .x = @intToFloat(f32, tower.tile_x),
+                            .y = @intToFloat(f32, tower.tile_y),
+                        };
+
+                        const angle = rlm.Vector2Angle(enemy.pos, tower_pos);
+                        const new_projectile = Projectile{
+                            .direction = rlm.Vector2Normalize(rlm.Vector2Subtract(enemy.pos, tower_pos)),
+                            .angle = angle,
+                            .pos = rl.Vector2{
+                                .x = tower_pos.x,
+                                .y = tower_pos.y,
+                            },
+                            .speed = projectile_speed,
+                            .tower = tower,
+                        };
+                        try projectiles.append(new_projectile);
 
                         // TODO(caleb): Towers can be smarter than just finding the "first"
-                        //   in range enemy..
-                        enemy.hp -= @intCast(i32, tower.dmg);
+                        //   in range enemy.. MOVE ME TO PROJECTILE UPDATE
+                        enemy.hp -= @intCast(i32, tower.damage); // NOTE(caleb): this will happen after
+
                         break;
                     }
                 }
+            }
+        }
+
+        {
+            var projectile_index: i32 = 0;
+            while (projectile_index < projectiles.items.len) : (projectile_index += 1) {
+                var projectile = &projectiles.items[@intCast(u32, projectile_index)];
+
+                // Is this projectile off the screen or coliding with an enemy?
+                if ((projectile.pos.x > @intToFloat(f32, rl.GetScreenWidth())) or
+                    (projectile.pos.y > @intToFloat(f32, rl.GetScreenHeight())) or
+                    (projectile.pos.x < 0) or (projectile.pos.y < 0))
+                {
+                    _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
+                    projectile_index -= 1;
+                    continue;
+                }
+
+                // TODO(caleb): Hit enemy...
+
+                projectile.pos = rlm.Vector2Add(projectile.pos, rlm.Vector2Scale(projectile.direction, projectile.speed));
             }
         }
 
@@ -474,7 +526,7 @@ pub fn main() !void {
         var entry_index: u32 = 0;
         while (entry_index < towers.items.len + alive_enemies.items.len) : (entry_index += 1) {
             var added_entries: u8 = 0;
-            var new_entries: [2]DrawBufferEntry = undefined;
+            var new_entries: [3]DrawBufferEntry = undefined;
 
             if (towers.items.len > entry_index) {
                 const tower = towers.items[entry_index];
@@ -535,6 +587,18 @@ pub fn main() !void {
             };
 
             rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+        }
+
+        for (projectiles.items) |projectile| {
+            var dest_pos = isoTransformWithScreenOffset(projectile.pos.x, projectile.pos.y, 0);
+            dest_pos.y -= sprite_height * scale_factor / 2;
+            const dest_rect = rl.Rectangle{
+                .x = dest_pos.x,
+                .y = dest_pos.y,
+                .width = 4 * scale_factor,
+                .height = 2 * scale_factor,
+            };
+            rl.DrawRectanglePro(dest_rect, .{ .x = 0, .y = 0 }, 45, rl.BLACK);
         }
 
         rl.EndDrawing();
