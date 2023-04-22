@@ -2,10 +2,12 @@ const std = @import("std");
 const rl = @import("raylib");
 const rlm = @import("raylib-math");
 
-const projectile_speed = 0.3;
+const projectile_speed = 0.2;
 const max_layers = 5;
 const max_unique_track_tiles = 5;
 const scale_factor = 3;
+const font_size = 12;
+const font_spacing = 1;
 const map_width_in_tiles = 16;
 const map_height_in_tiles = 16;
 const sprite_width = 32;
@@ -18,9 +20,9 @@ const map_height = @floatToInt(c_int, isoTransform(@intToFloat(f32, map_width_in
 // *Assign entities screen coords. ( not tile coords )
 // *fix projectile rect's angle
 
-const anim_frames_speed = 10;
-const enemy_tps = 3; // Enemy tiles per second
-const tower_pps = 1; // Projectiles per second
+const anim_frames_speed = 7;
+const enemy_tps = 1; // Enemy tiles per second
+const tower_pps = 2; // Projectiles per second
 
 const Tileset = struct {
     columns: u32,
@@ -65,6 +67,11 @@ const Enemy = struct {
     prev_pos: rl.Vector2,
 };
 
+
+const tower_descs = [_][*c]const u8{"Eye of lauron", "Some say it is an eye.", };
+
+// TODO(caleb): Don't store anim_index inside tower. ( or damage ) ( tower level? )
+
 const Tower = struct {
     direction: Direction,
     tile_x: u32, // TODO(caleb): pos
@@ -76,7 +83,7 @@ const Tower = struct {
 
 const Projectile = struct {
     direction: rl.Vector2,
-    angle: f32,
+    target: rl.Vector2,
     speed: f32,
     pos: rl.Vector2,
     tower: *Tower, // NOTE(caleb): Carefull not to create dangling pointers here...
@@ -133,6 +140,16 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
     }
 }
 
+fn vector2LineAngle(start: rl.Vector2, end: rl.Vector2) f32
+{
+    const dot = start.x*end.x + start.y*end.y;      // Dot product
+
+    var dot_clamp = if (dot < -1.0) -1.0 else dot;    // Clamp
+    if (dot_clamp > 1.0) dot_clamp = 1.0;
+
+    return std.math.acos(dot_clamp);
+}
+
 const i_isometric_trans = rl.Vector2{ .x = @intToFloat(f32, sprite_width * scale_factor) * 0.5, .y = @intToFloat(f32, sprite_height * scale_factor) * 0.25 };
 const j_isometric_trans = rl.Vector2{ .x = -1 * @intToFloat(f32, sprite_width * scale_factor) * 0.5, .y = @intToFloat(f32, sprite_height * scale_factor) * 0.25 };
 
@@ -156,6 +173,18 @@ fn isoTransformWithScreenOffset(x: f32, y: f32, z: f32) rl.Vector2 {
     return out;
 }
 
+fn isoProjectProjectile(pos: rl.Vector2) rl.Vector2 {
+    var result = isoTransformWithScreenOffset(pos.x, pos.y, 0);
+    result.x += sprite_width * scale_factor / 2;
+    return result;
+}
+
+fn isoProjectSprite(pos: rl.Vector2) rl.Vector2 {
+    var result = isoTransformWithScreenOffset(pos.x, pos.y, 0);
+    result.y -= sprite_height * scale_factor / 2;
+    return result;
+}
+
 fn isoInvert(x: f32, y: f32) rl.Vector2 {
     const screen_offset = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - sprite_width * scale_factor / 2, .y = (@intToFloat(f32, rl.GetScreenHeight()) - @intToFloat(f32, map_height)) / 2 };
 
@@ -170,6 +199,9 @@ fn isoInvert(x: f32, y: f32) rl.Vector2 {
         .y = input.x * i_invert_isometric_trans.y + input.y * j_invert_isometric_trans.y,
     };
 }
+
+//fn towerFromTileCoords(tile_x: i32, tile_y: i32) ?*Tower {
+//}
 
 pub fn main() !void {
     rl.InitWindow(map_width, map_height, "twr-defns");
@@ -195,8 +227,12 @@ pub fn main() !void {
     var jam = rl.LoadMusicStream("assets/grasslands.wav");
     jam.looping = true;
     defer rl.UnloadMusicStream(jam);
+    rl.PlayMusicStream(jam); // NOTE(caleb): start playing here?
 
-    rl.PlayMusicStream(jam);
+    // Font
+    var font = rl.LoadFont("assets/PICO-8_mono.ttf");
+    defer rl.UnloadFont(font);
+
 
     // Load tileset
     var tileset: Tileset = undefined;
@@ -283,6 +319,10 @@ pub fn main() !void {
         anim_map.first_gid = @intCast(u32, first_gid.Integer);
     }
 
+    var debug_projectile = false;
+
+    var selected_tower: ?*Tower = null;
+
     var anim_current_frame: u8 = 0;
     var anim_frames_counter: u8 = 0;
     var enemy_tps_frame_counter: u8 = 0;
@@ -338,15 +378,20 @@ pub fn main() !void {
                 updateEnemy(&tileset, &board_map, enemy);
             }
 
-            if (alive_enemies.items.len < 5) {
+            if (alive_enemies.items.len < 1) {
                 const newEnemy = Enemy{
                     .direction = Direction.left,
                     .pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
                     .prev_pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
-                    .hp = 10,
+                    .hp = 50,
                 };
                 try alive_enemies.append(newEnemy);
             }
+        }
+
+        // F1 to enable projectile debugging
+        if (rl.IsKeyPressed(rl.KeyboardKey.KEY_F1)) {
+            debug_projectile = !debug_projectile;
         }
 
         // Get mouse position
@@ -365,11 +410,13 @@ pub fn main() !void {
 
                 // OK now considered valid to place a tower but is this tile occupied?
                 var hasTower = false;
-                for (towers.items) |tower| {
+                for (towers.items) |*tower| {
                     if ((tower.tile_x == @intCast(u32, selected_tile_x)) and
                         (tower.tile_y == @intCast(u32, selected_tile_y)))
                     {
                         hasTower = true;
+                        selected_tower = tower;
+
                         break;
                     }
                 }
@@ -428,19 +475,11 @@ pub fn main() !void {
                             tower.direction = Direction.left;
                         }
 
-                        const tower_pos = rl.Vector2{
-                            .x = @intToFloat(f32, tower.tile_x),
-                            .y = @intToFloat(f32, tower.tile_y),
-                        };
-
-                        const angle = rlm.Vector2Angle(enemy.pos, tower_pos);
+                        const tower_pos = rl.Vector2{.x = @intToFloat(f32, tower.tile_x), .y=@intToFloat(f32, tower.tile_y)};
                         const new_projectile = Projectile{
                             .direction = rlm.Vector2Normalize(rlm.Vector2Subtract(enemy.pos, tower_pos)),
-                            .angle = angle,
-                            .pos = rl.Vector2{
-                                .x = tower_pos.x,
-                                .y = tower_pos.y,
-                            },
+                            .target = enemy.pos,
+                            .pos = tower_pos,
                             .speed = projectile_speed,
                             .tower = tower,
                         };
@@ -461,10 +500,12 @@ pub fn main() !void {
             while (projectile_index < projectiles.items.len) : (projectile_index += 1) {
                 var projectile = &projectiles.items[@intCast(u32, projectile_index)];
 
+                var projected_pos = isoProjectProjectile(projectile.pos);
+
                 // Is this projectile off the screen or coliding with an enemy?
-                if ((projectile.pos.x > @intToFloat(f32, rl.GetScreenWidth())) or
-                    (projectile.pos.y > @intToFloat(f32, rl.GetScreenHeight())) or
-                    (projectile.pos.x < 0) or (projectile.pos.y < 0))
+                if ((projected_pos.x > @intToFloat(f32, rl.GetScreenWidth())) or
+                    (projected_pos.y > @intToFloat(f32, rl.GetScreenHeight())) or
+                    (projected_pos.x < 0) or (projected_pos.y < 0))
                 {
                     _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
                     projectile_index -= 1;
@@ -488,7 +529,7 @@ pub fn main() !void {
         }
 
         rl.BeginDrawing();
-        rl.ClearBackground(rl.Color{ .r = 77, .g = 128, .b = 201, .a = 255 });
+        rl.ClearBackground(rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 });
 
         var tile_y: i32 = 0;
         while (tile_y < map_height_in_tiles) : (tile_y += 1) {
@@ -577,8 +618,13 @@ pub fn main() !void {
                 .height = sprite_height,
             };
 
-            var dest_pos = isoTransformWithScreenOffset(entry.tile_pos.x, entry.tile_pos.y, 0);
-            dest_pos.y -= sprite_height * scale_factor / 2;
+            var dest_pos = isoProjectSprite(entry.tile_pos);
+
+            if ((@floatToInt(i32, entry.tile_pos.x) == selected_tile_x) and
+                (@floatToInt(i32, entry.tile_pos.y)  == selected_tile_y)) {
+                dest_pos.y -= 10;
+            }
+
             const dest_rect = rl.Rectangle{
                 .x = dest_pos.x,
                 .y = dest_pos.y,
@@ -590,15 +636,56 @@ pub fn main() !void {
         }
 
         for (projectiles.items) |projectile| {
-            var dest_pos = isoTransformWithScreenOffset(projectile.pos.x, projectile.pos.y, 0);
-            dest_pos.y -= sprite_height * scale_factor / 2;
+            var dest_pos = isoProjectProjectile(projectile.pos);
             const dest_rect = rl.Rectangle{
                 .x = dest_pos.x,
                 .y = dest_pos.y,
-                .width = 4 * scale_factor,
+                .width = 2 * scale_factor,
                 .height = 2 * scale_factor,
             };
-            rl.DrawRectanglePro(dest_rect, .{ .x = 0, .y = 0 }, 45, rl.BLACK);
+            rl.DrawRectanglePro(dest_rect, .{ .x = 0, .y = 0 }, 0, rl.Color{.r=34, .g=35, .b=35, .a=255});
+
+            if (debug_projectile) {
+                const tower_pos = rl.Vector2{
+                    .x = @intToFloat(f32, projectile.tower.*.tile_x),
+                    .y=@intToFloat(f32, projectile.tower.*.tile_y),
+                };
+                var projected_start = isoProjectProjectile(tower_pos);
+                var projected_end = isoProjectProjectile(projectile.target);
+                rl.DrawLineV(projected_start, projected_end, rl.Color{.r=255, .g=0, .b=0, .a=255});
+            }
+        }
+
+        if (selected_tower != null) {
+            const map_tile_index = selected_tower.?.anim_index + @enumToInt(selected_tower.?.direction) * 4 + anim_current_frame;
+            const target_tile_row = @divTrunc(map_tile_index - anim_map.first_gid, tileset.columns);
+            const target_tile_column = @mod(map_tile_index - anim_map.first_gid, tileset.columns);
+            const source_rect = rl.Rectangle{
+                .x = @intToFloat(f32, target_tile_column * sprite_width),
+                .y = @intToFloat(f32, target_tile_row * sprite_height),
+                .width = sprite_width,
+                .height = sprite_height,
+            };
+
+            const pad = 3;
+            const dest_rect = rl.Rectangle{
+                .x = pad,
+                .y = pad,
+                .width = sprite_width * scale_factor,
+                .height = sprite_height * scale_factor,
+            };
+            rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+            rl.DrawRectangleLinesEx(dest_rect, 2, rl.Color{.r=34, .g=35, .b=35, .a=255});
+
+            rl.DrawTextEx(font, "Name: ", rl.Vector2{.x=dest_rect.width + dest_rect.x + pad, .y=pad}, font_size, font_spacing, rl.Color{.r=34, .g=35, .b=35, .a=255});
+            var text_dim = rl.MeasureTextEx(font, "Name: ", font_size, font_spacing);
+            rl.DrawTextEx(font, tower_descs[0], rl.Vector2{.x=dest_rect.width + dest_rect.x + pad + text_dim.x, .y=pad}, font_size, 1, rl.Color{.r=34, .g=35, .b=35, .a=255});
+            rl.DrawTextEx(font, "Desc: ", rl.Vector2{.x=dest_rect.width + pad * 2, .y=pad * 2 + text_dim.y}, font_size, font_spacing, rl.Color{.r=34, .g=35, .b=35, .a=255});
+            text_dim = rl.MeasureTextEx(font, "Desc: ", font_size, font_spacing);
+            rl.DrawTextEx(font, tower_descs[1], rl.Vector2{.x=dest_rect.width + dest_rect.x + pad + text_dim.x, .y=pad * 2 + text_dim.y}, font_size, 1, rl.Color{.r=34, .g=35, .b=35, .a=255});
+
+            // Rectangles for speed + damage
+            // I would like to do something sim to btd upgrades.
         }
 
         rl.EndDrawing();
