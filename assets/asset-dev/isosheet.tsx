@@ -3,7 +3,7 @@
  <editorsettings>
   <export target="isosheet.tsj" format="json"/>
  </editorsettings>
- <image source="isosheet.png" width="512" height="192"/>
+ <image source="../isosheet.png" width="512" height="192"/>
  <tile id="18" type="track"/>
  <tile id="19" type="track_start"/>
 </tileset>

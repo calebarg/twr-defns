@@ -2,27 +2,30 @@ const std = @import("std");
 const rl = @import("raylib");
 const rlm = @import("raylib-math");
 
-var scale_factor: f32 = 3;
+const initial_scale_factor = 4;
+var scale_factor: f32 = initial_scale_factor;
 var origin = rl.Vector2{ .x = 0, .y = 0 };
 
-const projectile_speed = 0.2;
+const projectile_speed = 0.1;
 const max_layers = 5;
 const max_unique_track_tiles = 5;
-const font_size = 12;
+const font_size = 15;
 const font_spacing = 1;
-const map_width_in_tiles = 16;
-const map_height_in_tiles = 16;
+const board_width_in_tiles = 16;
+const board_height_in_tiles = 16;
 const sprite_width = 32;
 const sprite_height = 32;
 
 // TODO(caleb):
-// *ACTUALLY fix offsets for towers and enemies. Rn I just offset by half sprite's display height ( not ideal )
-// *Assign entities screen coords. ( not tile coords )
-// *fix projectile rect's angle
+// *ACTUALLY fix offsets for towers and enemies. Rn I just offset by half sprite's display height ( not ideal ) - bounding boxes?
 
 const anim_frames_speed = 7;
-const enemy_tps = 1; // Enemy tiles per second
-const tower_pps = 2; // Projectiles per second
+const enemy_tile_step = 32;
+const enemy_tps = enemy_tile_step * 3; // Enemy tiles per second
+const tower_pps = 5; // Projectiles per second
+
+const color_off_black = rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 };
+const color_off_white = rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 };
 
 const Tileset = struct {
     columns: u32,
@@ -47,8 +50,8 @@ const Map = struct {
     first_gid: u32,
 
     pub fn tileIndexFromCoord(self: *Map, tile_x: u32, tile_y: u32) ?u32 {
-        std.debug.assert(tile_y * map_width_in_tiles + tile_x < self.*.tile_indicies.items.len);
-        const map_tile_index = self.*.tile_indicies.items[tile_y * map_width_in_tiles + tile_x];
+        std.debug.assert(tile_y * board_width_in_tiles + tile_x < self.*.tile_indicies.items.len);
+        const map_tile_index = self.*.tile_indicies.items[tile_y * board_width_in_tiles + tile_x];
         return if (@intCast(i32, map_tile_index) - @intCast(i32, self.*.first_gid) < 0) null else @intCast(u32, @intCast(i32, map_tile_index) - @intCast(i32, self.*.first_gid));
     }
 };
@@ -62,9 +65,9 @@ const Direction = enum(u32) {
 
 const Enemy = struct {
     direction: Direction,
+    last_step_direction: Direction,
     hp: i32,
     pos: rl.Vector2,
-    prev_pos: rl.Vector2,
 };
 
 const tower_descs = [_][*c]const u8{
@@ -96,9 +99,9 @@ const DrawBufferEntry = struct {
     map_tile_index: u32,
 };
 
-inline fn boundsCheck(x: i32, y: i32, dx: i32, dy: i32) bool {
-    if ((y + dy < 0) or (y + dy >= map_height_in_tiles) or
-        (x + dx < 0) or (x + dx >= map_width_in_tiles))
+inline fn boundsCheck(x: i32, y: i32) bool {
+    if ((y < 0) or (y >= board_height_in_tiles) or
+        (x < 0) or (x >= board_width_in_tiles))
     {
         return false;
     }
@@ -120,30 +123,90 @@ inline fn clampf32(value: f32, min: f32, max: f32) f32 {
 fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
     var move_amt = rl.Vector2{ .x = 0, .y = 0 };
     switch (enemy.*.direction) {
-        .left => move_amt.x -= 1,
-        .up => move_amt.y -= 1,
-        .down => move_amt.y += 1,
-        .right => move_amt.x += 1,
+        .left => move_amt.x -= 1 / @intToFloat(f32, enemy_tile_step),
+        .up => move_amt.y -= 1 / @intToFloat(f32, enemy_tile_step),
+        .down => move_amt.y += 1 / @intToFloat(f32, enemy_tile_step),
+        .right => move_amt.x += 1 / @intToFloat(f32, enemy_tile_step),
     }
 
-    const tile_x = @floatToInt(i32, @round(enemy.*.pos.x));
-    const tile_y = @floatToInt(i32, @round(enemy.*.pos.y));
-    const tile_dx = @floatToInt(i32, @round(move_amt.x));
-    const tile_dy = @floatToInt(i32, @round(move_amt.y));
+    const next_tile_pos = rlm.Vector2Add(enemy.pos, move_amt);
 
-    if (!boundsCheck(tile_x, tile_y, tile_dx, tile_dy)) {
+    if (!boundsCheck(@floatToInt(i32, @floor(next_tile_pos.x)), @floatToInt(i32, @floor(next_tile_pos.y)))) {
         return;
     }
 
-    const target_tile_id = map.tile_indicies.items[@intCast(u32, tile_y + tile_dy) * map_width_in_tiles + @intCast(u32, tile_x + tile_dx)] - 1;
-    if (tileset.checkIsTrackTile(target_tile_id) and !movingBackwards(enemy.*.pos.x + move_amt.x, enemy.pos.y + move_amt.y, enemy.*.prev_pos.x, enemy.*.prev_pos.y)) {
-        enemy.*.prev_pos = enemy.*.pos;
-        enemy.*.pos.x += move_amt.x;
-        enemy.*.pos.y += move_amt.y;
-    } else { // Choose new direction
-        enemy.*.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.*.direction) + 1, @enumToInt(Direction.right) + 1));
-        updateEnemy(tileset, map, enemy);
+    const target_tile_id = map.tile_indicies.items[@floatToInt(u32, next_tile_pos.y) * board_width_in_tiles + @floatToInt(u32, next_tile_pos.x)] - 1;
+    if (tileset.checkIsTrackTile(target_tile_id)) {
+        var is_valid_move = true;
+
+        // If moving down check 1 tile down ( we want to keep a tile rel y pos of 0 before turning )
+        if (enemy.direction == Direction.down) {
+
+            // If not in bounds than don't worry about checking tile.
+            if (boundsCheck(@floatToInt(i32, @floor(next_tile_pos.x)), @floatToInt(i32, @floor(next_tile_pos.y)) + 1)) {
+                const plus1_y_target_tile_id = map.tile_indicies.items[(@floatToInt(u32, @floor(next_tile_pos.y)) + 1) * board_width_in_tiles + @floatToInt(u32, @floor(next_tile_pos.x))] - 1;
+
+                // Invalidate move
+                if (!tileset.checkIsTrackTile(plus1_y_target_tile_id) and next_tile_pos.y - @floor(next_tile_pos.y) > 0) {
+                    is_valid_move = false;
+                }
+            }
+        }
+        else if (enemy.direction == Direction.right) {
+
+            // If not in bounds than don't worry about checking tile.
+            if (boundsCheck(@floatToInt(i32, @floor(next_tile_pos.x)) + 1, @floatToInt(i32, @floor(next_tile_pos.y)))) {
+                const plus1_x_target_tile_id = map.tile_indicies.items[@floatToInt(u32, @floor(next_tile_pos.y)) * board_width_in_tiles + @floatToInt(u32, @floor(next_tile_pos.x)) + 1] - 1;
+
+                // Invalidate move
+                if (!tileset.checkIsTrackTile(plus1_x_target_tile_id) and next_tile_pos.x - @floor(next_tile_pos.x) > 0) {
+                    is_valid_move = false;
+                }
+            }
+        }
+
+        if (is_valid_move) {
+            enemy.pos = next_tile_pos;
+            enemy.last_step_direction = enemy.direction;
+            return;
+        }
     }
+
+    // Choose new direction
+    const current_direction = enemy.direction;
+    enemy.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.*.direction) + 1, @enumToInt(Direction.right) + 1));
+    while(enemy.direction != current_direction) : (enemy.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.direction) + 1, @enumToInt(Direction.right) + 1))) {
+        var future_target_tile_id: ?u32 = null;
+        switch(enemy.direction) {
+            .right => {
+                if (boundsCheck(@floatToInt(i32, enemy.pos.x) + 1, @floatToInt(i32, enemy.pos.y)) and enemy.last_step_direction != Direction.left) {
+                    future_target_tile_id = map.tile_indicies.items[@floatToInt(u32, enemy.pos.y) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x) + 1] - 1;
+                }
+            },
+            .left => {
+                if (boundsCheck(@floatToInt(i32, enemy.pos.x) - 1, @floatToInt(i32, enemy.pos.y)) and enemy.last_step_direction != Direction.right) {
+                    future_target_tile_id = map.tile_indicies.items[@floatToInt(u32, enemy.pos.y) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x) - 1] - 1;
+                }
+            },
+           .up => {
+                if (boundsCheck(@floatToInt(i32, enemy.pos.x), @floatToInt(i32, enemy.pos.y) - 1) and enemy.last_step_direction != Direction.down) {
+                    future_target_tile_id = map.tile_indicies.items[(@floatToInt(u32, enemy.pos.y) - 1) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x)] - 1;
+                }
+            },
+           .down => {
+                if (boundsCheck(@floatToInt(i32, enemy.pos.x), @floatToInt(i32, enemy.pos.y) + 1) and enemy.last_step_direction != Direction.up) {
+                    future_target_tile_id = map.tile_indicies.items[(@floatToInt(u32, enemy.pos.y) + 1) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x)] - 1;
+                }
+            },
+        }
+
+        if ((future_target_tile_id != null) and tileset.checkIsTrackTile(future_target_tile_id.?)) {
+            break;
+        }
+    }
+
+    std.debug.assert(enemy.direction != current_direction);
+    updateEnemy(tileset, map, enemy);
 }
 
 fn vector2LineAngle(start: rl.Vector2, end: rl.Vector2) f32 {
@@ -174,8 +237,17 @@ fn isoTransform(x: f32, y: f32, z: f32) rl.Vector2 {
     return out;
 }
 
+fn boardDim() rl.Vector2 {
+    const last_tile_pos = isoTransformWithScreenOffset(@intToFloat(f32, board_width_in_tiles - 1),
+             @intToFloat(f32, board_height_in_tiles - 1), 0);
+    return rl.Vector2{
+        .x = last_tile_pos.x,
+        .y = last_tile_pos.y,// + @intToFloat(f32, sprite_height) * scale_factor / 2,
+    };
+}
+
 fn boardHeight() c_int {
-    const result = @floatToInt(c_int, isoTransform(@intToFloat(f32, map_width_in_tiles), @intToFloat(f32, map_height_in_tiles), 0).y) + @divTrunc(sprite_height * @floatToInt(c_int, scale_factor), 2);
+    const result = @floatToInt(c_int, isoTransform(@intToFloat(f32, board_width_in_tiles), @intToFloat(f32, board_height_in_tiles), 0).y) + @divTrunc(sprite_height * @floatToInt(c_int, scale_factor), 2);
     return result;
 }
 
@@ -224,16 +296,16 @@ fn isoInvert(x: f32, y: f32) rl.Vector2 {
 //}
 
 pub fn main() !void {
-    const map_width = sprite_width * map_width_in_tiles * @floatToInt(c_int, scale_factor);
-    rl.InitWindow(map_width, boardHeight(), "twr-defns");
+    const board_width = sprite_width * board_width_in_tiles * @floatToInt(c_int, scale_factor);
+    rl.InitWindow(board_width, boardHeight(), "twr-defns");
     rl.SetWindowState(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE);
     rl.SetWindowState(rl.ConfigFlags.FLAG_VSYNC_HINT);
-    rl.SetWindowMinSize(map_width, boardHeight());
+    rl.SetWindowMinSize(board_width, boardHeight());
     rl.SetTargetFPS(60);
 
     rl.InitAudioDevice();
     defer rl.CloseAudioDevice();
-    rl.SetMasterVolume(0.1);
+    rl.SetMasterVolume(1);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -346,16 +418,16 @@ pub fn main() !void {
 
     var anim_current_frame: u8 = 0;
     var anim_frames_counter: u8 = 0;
-    var enemy_tps_frame_counter: u8 = 0;
+    var enemy_tps_frame_counter: u32 = 0;
     var tower_pps_frame_counter: u32 = 0;
 
     var enemy_start_tile_y: u32 = 0;
     var enemy_start_tile_x: u32 = 0;
     {
         var found_enemy_start_tile = false;
-        outer: while (enemy_start_tile_y < map_height_in_tiles) : (enemy_start_tile_y += 1) {
+        outer: while (enemy_start_tile_y < board_height_in_tiles) : (enemy_start_tile_y += 1) {
             enemy_start_tile_x = 0;
-            while (enemy_start_tile_x < map_width_in_tiles) : (enemy_start_tile_x += 1) {
+            while (enemy_start_tile_x < board_width_in_tiles) : (enemy_start_tile_x += 1) {
                 const map_tile_index = board_map.tileIndexFromCoord(enemy_start_tile_x, enemy_start_tile_y) orelse continue;
                 if ((map_tile_index) == tileset.track_start_id) {
                     found_enemy_start_tile = true;
@@ -378,6 +450,18 @@ pub fn main() !void {
     var projectiles = std.ArrayList(Projectile).init(ally);
     defer projectiles.deinit();
 
+    // TODO(caleb): spawn timer... also waves.
+    var enemies_spawned: u32 = 0;
+    while (enemies_spawned < 10) : (enemies_spawned += 1) {
+        const newEnemy = Enemy{
+            .direction = Direction.left,
+            .last_step_direction = Direction.left,
+            .pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
+            .hp = 50,
+        };
+        try alive_enemies.append(newEnemy);
+    }
+
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
         rl.UpdateMusicStream(jam);
@@ -393,20 +477,16 @@ pub fn main() !void {
         if (enemy_tps_frame_counter >= @divTrunc(60, enemy_tps)) {
             enemy_tps_frame_counter = 0;
 
-            // Update enemies
-
             for (alive_enemies.items) |*enemy| {
                 updateEnemy(&tileset, &board_map, enemy);
             }
 
-            if (alive_enemies.items.len < 1) {
-                const newEnemy = Enemy{
-                    .direction = Direction.left,
-                    .pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
-                    .prev_pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
-                    .hp = 50,
-                };
-                try alive_enemies.append(newEnemy);
+            var fraction_of_frame = 60 / @intToFloat(f32, enemy_tps);
+            while (fraction_of_frame < 1) : (fraction_of_frame += 60 / @intToFloat(f32, enemy_tps))
+            {
+                for (alive_enemies.items) |*enemy| {
+                    updateEnemy(&tileset, &board_map, enemy);
+                }
             }
         }
 
@@ -425,17 +505,17 @@ pub fn main() !void {
         const selected_tile_x = @floatToInt(i32, selected_tile_pos.x);
         const selected_tile_y = @floatToInt(i32, selected_tile_pos.y);
 
-        if (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
+        if (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_MIDDLE)) {
             // Update origin by last frames mouse delta
             origin = rlm.Vector2Add(origin, rl.GetMouseDelta());
         }
 
         // Try place tower on selected tile
         if (rl.IsMouseButtonPressed(rl.MouseButton.MOUSE_BUTTON_LEFT) and
-            (selected_tile_x < map_width_in_tiles) and (selected_tile_y < map_height_in_tiles) and
+            (selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
             (selected_tile_x >= 0) and (selected_tile_y >= 0))
         {
-            const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * map_width_in_tiles + selected_tile_x)];
+            const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * board_width_in_tiles + selected_tile_x)];
             if (!tileset.checkIsTrackTile(tile_index)) {
 
                 // OK now considered valid to place a tower but is this tile occupied?
@@ -452,6 +532,7 @@ pub fn main() !void {
                 }
 
                 if (!hasTower) {
+                    selected_tower = null;
                     const new_tower = Tower{
                         .direction = Direction.down,
                         .tile_x = @intCast(u32, selected_tile_x),
@@ -515,10 +596,6 @@ pub fn main() !void {
                         };
                         try projectiles.append(new_projectile);
 
-                        // TODO(caleb): Towers can be smarter than just finding the "first"
-                        //   in range enemy.. MOVE ME TO PROJECTILE UPDATE
-                        enemy.hp -= @intCast(i32, tower.damage); // NOTE(caleb): this will happen after
-
                         break;
                     }
                 }
@@ -527,24 +604,35 @@ pub fn main() !void {
 
         {
             var projectile_index: i32 = 0;
-            while (projectile_index < projectiles.items.len) : (projectile_index += 1) {
+            outer: while (projectile_index < projectiles.items.len) : (projectile_index += 1) {
                 var projectile = &projectiles.items[@intCast(u32, projectile_index)];
-
                 var projected_pos = isoProjectProjectile(projectile.pos);
 
                 // Is this projectile off the screen or coliding with an enemy?
-                if ((projected_pos.x > @intToFloat(f32, rl.GetScreenWidth())) or
-                    (projected_pos.y > @intToFloat(f32, rl.GetScreenHeight())) or
-                    (projected_pos.x < 0) or (projected_pos.y < 0))
+                if ((@floor(projectile.pos.x) > board_width_in_tiles * 2) or
+                    (@floor(projectile.pos.y) > board_height_in_tiles * 2) or
+                    (projectile.pos.x < board_width_in_tiles * -1) or (projectile.pos.y < board_height_in_tiles * -1))
                 {
                     _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
                     projectile_index -= 1;
                     continue;
                 }
 
-                // TODO(caleb): Hit enemy...
+                for (alive_enemies.items) |*enemy| { // This could get bad... ( spatial partitioning? )
+                    const projected_enemy_pos = isoProjectSprite(enemy.pos);
+                    if ((projected_pos.x >= projected_enemy_pos.x) and
+                        (projected_pos.x <= projected_enemy_pos.x + sprite_width * scale_factor) and
+                        (projected_pos.y >= projected_enemy_pos.y) and
+                        (projected_pos.y <= projected_enemy_pos.y + sprite_height * scale_factor))
+                    {
+                        _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
+                        projectile_index -= 1;
+                        enemy.hp -= @intCast(i32, projectile.tower.damage);
+                        continue :outer;
+                    }
 
-                projectile.pos = rlm.Vector2Add(projectile.pos, rlm.Vector2Scale(projectile.direction, projectile.speed));
+                    projectile.pos = rlm.Vector2Add(projectile.pos, rlm.Vector2Scale(projectile.direction, projectile.speed));
+                }
             }
         }
 
@@ -562,9 +650,9 @@ pub fn main() !void {
         rl.ClearBackground(rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 });
 
         var tile_y: i32 = 0;
-        while (tile_y < map_height_in_tiles) : (tile_y += 1) {
+        while (tile_y < board_height_in_tiles) : (tile_y += 1) {
             var tile_x: i32 = 0;
-            while (tile_x < map_width_in_tiles) : (tile_x += 1) {
+            while (tile_x < board_width_in_tiles) : (tile_x += 1) {
                 const map_tile_index = board_map.tileIndexFromCoord(@intCast(u32, tile_x), @intCast(u32, tile_y)) orelse continue;
                 var dest_pos = isoTransformWithScreenOffset(@intToFloat(f32, tile_x), @intToFloat(f32, tile_y), 0);
                 if (tile_x == selected_tile_x and tile_y == selected_tile_y) {
@@ -698,25 +786,28 @@ pub fn main() !void {
                 .height = sprite_height,
             };
 
+            const text_dim_a = rl.MeasureTextEx(font, "Name: ", font_size, font_spacing);
+            const text_dim_b = rl.MeasureTextEx(font, tower_descs[0], font_size, font_spacing);
+            const text_dim_c = rl.MeasureTextEx(font, "Desc: ", font_size, font_spacing);
+            const text_dim_d = rl.MeasureTextEx(font, tower_descs[1], font_size, font_spacing);
+
+            const text_width = @max(rlm.Vector2Add(text_dim_a, text_dim_b).x,
+                rlm.Vector2Add(text_dim_c, text_dim_d).x);
+
             const pad = 3;
             const dest_rect = rl.Rectangle{
-                .x = pad,
+                .x = @intToFloat(f32, rl.GetScreenWidth() - @floatToInt(c_int, text_width) - pad - @floatToInt(c_int, sprite_width * initial_scale_factor * 0.30)),
                 .y = pad,
-                .width = sprite_width * scale_factor,
-                .height = sprite_height * scale_factor,
+                .width = sprite_width * initial_scale_factor * 0.30,
+                .height = sprite_height * initial_scale_factor * 0.30,
             };
             rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-            rl.DrawRectangleLinesEx(dest_rect, 2, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
+            rl.DrawRectangleLinesEx(dest_rect, 2, color_off_black);
 
-            rl.DrawTextEx(font, "Name: ", rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad, .y = pad }, font_size, font_spacing, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
-            var text_dim = rl.MeasureTextEx(font, "Name: ", font_size, font_spacing);
-            rl.DrawTextEx(font, tower_descs[0], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim.x, .y = pad }, font_size, 1, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
-            rl.DrawTextEx(font, "Desc: ", rl.Vector2{ .x = dest_rect.width + pad * 2, .y = pad * 2 + text_dim.y }, font_size, font_spacing, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
-            text_dim = rl.MeasureTextEx(font, "Desc: ", font_size, font_spacing);
-            rl.DrawTextEx(font, tower_descs[1], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim.x, .y = pad * 2 + text_dim.y }, font_size, 1, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
-
-            // Rectangles for speed + damage
-            // I would like to do something sim to btd upgrades.
+            rl.DrawTextEx(font, "Name: ", rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad, .y = pad }, font_size, font_spacing, color_off_black);
+            rl.DrawTextEx(font, tower_descs[0], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim_a.x, .y = pad }, font_size, 1, color_off_black);
+            rl.DrawTextEx(font, "Desc: ", rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad, .y = pad * 2 + text_dim_c.y }, font_size, font_spacing, color_off_black);
+            rl.DrawTextEx(font, tower_descs[1], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim_c.x, .y = pad * 2 + text_dim_c.y }, font_size, 1, color_off_black);
         }
 
         if (debug_origin) {
