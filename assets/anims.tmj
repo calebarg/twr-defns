@@ -1,11 +1,15 @@
 { "compressionlevel":-1,
- "height":2,
+ "height":6,
  "infinite":false,
  "layers":[
         {
          "data":[33,
-            49],
-         "height":2,
+            49,
+            65,
+            81,
+            97,
+            113],
+         "height":6,
          "id":1,
          "name":"Tile Layer 1",
          "opacity":1,

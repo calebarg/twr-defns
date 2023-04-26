@@ -1,11 +1,11 @@
 { "columns":16,
  "image":"isosheet.png",
- "imageheight":192,
+ "imageheight":512,
  "imagewidth":512,
  "margin":0,
  "name":"isosheet",
  "spacing":0,
- "tilecount":96,
+ "tilecount":256,
  "tiledversion":"1.10.1",
  "tileheight":32,
  "tiles":[
@@ -16,6 +16,30 @@
         {
          "id":19,
          "type":"track_start"
+        }, 
+        {
+         "id":32,
+         "type":"enemy"
+        }, 
+        {
+         "id":48,
+         "type":"tower"
+        }, 
+        {
+         "id":64,
+         "type":"tower"
+        }, 
+        {
+         "id":80,
+         "type":"tower"
+        }, 
+        {
+         "id":96,
+         "type":"tower"
+        }, 
+        {
+         "id":112,
+         "type":"tower"
         }],
  "tilewidth":32,
  "type":"tileset",

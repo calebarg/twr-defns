@@ -9,8 +9,6 @@ var origin = rl.Vector2{ .x = 0, .y = 0 };
 const tower_buy_area_sprite_scale = 0.5;
 const tower_buy_area_towers_per_row = 1;
 const projectile_speed = 0.1;
-const max_layers = 5;
-const max_unique_track_tiles = 5;
 const font_size = 16;
 const font_spacing = 1;
 const board_width_in_tiles = 16;
@@ -22,6 +20,7 @@ const sprite_height = 32;
 // *ACTUALLY fix offsets for towers and enemies. Rn I just offset by half sprite's display height ( not ideal ) - bounding boxes?
 // *Grey out tiles in range on place
 // *Treat tiles as draw buffer entries. ( One way to do it would be moving tiles to an array list just like enemies, towers, bullets, etc...)
+// *Cool void background effect (behind the board)???
 
 const anim_frames_speed = 7;
 const enemy_tile_step = 32;
@@ -34,18 +33,16 @@ const color_off_white = rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 };
 const Tileset = struct {
     columns: u32,
     track_start_id: u32,
-    tile_id_count: u8,
-    track_tile_ids: [max_unique_track_tiles]u32, // This is silly..
+    track_id: u32,
     tex: rl.Texture,
 
-    pub fn checkIsTrackTile(self: Tileset, target_tile_id: u32) bool {
-        var track_tile_index: u8 = 0;
-        while (track_tile_index < self.tile_id_count) : (track_tile_index += 1) {
-            if (self.track_tile_ids[track_tile_index] == target_tile_id) {
-                return true;
-            }
+    pub inline fn isTrackTile(self: Tileset, target_tile_id: u32) bool {
+        var result = false;
+        if ((self.track_start_id == target_tile_id) or
+            (self.track_id == target_tile_id)) {
+            result = true;
         }
-        return false;
+        return result;
     }
 };
 
@@ -53,10 +50,10 @@ const Map = struct {
     tile_indicies: std.ArrayList(u32),
     first_gid: u32,
 
-    pub fn tileIndexFromCoord(self: *Map, tile_x: u32, tile_y: u32) ?u32 {
+    pub fn tileIDFromCoord(self: *Map, tile_x: u32, tile_y: u32) ?u32 {
         std.debug.assert(tile_y * board_width_in_tiles + tile_x < self.*.tile_indicies.items.len);
-        const map_tile_index = self.*.tile_indicies.items[tile_y * board_width_in_tiles + tile_x];
-        return if (@intCast(i32, map_tile_index) - @intCast(i32, self.*.first_gid) < 0) null else @intCast(u32, @intCast(i32, map_tile_index) - @intCast(i32, self.*.first_gid));
+        const ts_id = self.tile_indicies.items[tile_y * board_width_in_tiles + tile_x];
+        return if (@intCast(i32, ts_id) - @intCast(i32, self.*.first_gid) < 0) null else @intCast(u32, @intCast(i32, ts_id) - @intCast(i32, self.*.first_gid));
     }
 };
 
@@ -67,7 +64,24 @@ const Direction = enum(u32) {
     right,
 };
 
+const EnemyKind = enum(u32) {
+    gremlin_wiz_guy = 0,
+};
+
+const EnemyData = struct {
+    hp: u32,
+    tile_id: u32,
+};
+
+var enemies_data = [_]EnemyData{
+    EnemyData{
+        .hp = 10,
+        .tile_id = undefined,
+    },
+};
+
 const Enemy = struct {
+    kind: EnemyKind,
     direction: Direction,
     last_step_direction: Direction,
     hp: i32,
@@ -79,44 +93,56 @@ const TowerKind = enum(u32) {
     placeholder_1,
     placeholder_2,
     placeholder_3,
+    placeholder_4,
 };
 
 const tower_names = [_][*c]const u8{
     "Floating eye",
-    "Placeholder name",
-    "Placeholder name",
-    "Placeholder name",
-
+    "Placeholder 1",
+    "Placeholder 2",
+    "Placeholder 3",
+    "Placeholder 4",
 };
 
 const tower_descs = [_][*c]const u8{
     "Some say it is an eye.",
-    "Place holder desc",
-    "Place holder desc",
-    "Place holder desc",
+    "Placeholder desc 1",
+    "Placeholder desc 2",
+    "Placeholder desc 3",
+    "Placeholder desc 4",
 };
 
 const TowerData = struct {
     damage: u32,
     range: u32,
+    tile_id: u32,
 };
 
-const towers_data = [_]TowerData{
+var towers_data = [_]TowerData{
     TowerData{ // floating eye
         .damage = 1,
         .range = 4,
+        .tile_id = undefined,
     },
-    TowerData{ // placeholder
+    TowerData{ // placeholder 1
         .damage = 1,
         .range = 4,
+        .tile_id = undefined,
     },
-    TowerData{ // placeholder
+    TowerData{ // placeholder 2
         .damage = 1,
         .range = 4,
+        .tile_id = undefined,
     },
-    TowerData{ // placeholder
+    TowerData{ // placeholder 3
         .damage = 1,
         .range = 4,
+        .tile_id = undefined,
+    },
+    TowerData{ // placeholder 4
+        .damage = 1,
+        .range = 4,
+        .tile_id = undefined,
     },
 };
 
@@ -138,7 +164,7 @@ const Projectile = struct {
 
 const DrawBufferEntry = struct {
     tile_pos: rl.Vector2,
-    map_tile_index: u32,
+    ts_id: u32,
 };
 
 const Input = struct {
@@ -182,7 +208,7 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
     }
 
     const target_tile_id = map.tile_indicies.items[@floatToInt(u32, next_tile_pos.y) * board_width_in_tiles + @floatToInt(u32, next_tile_pos.x)] - 1;
-    if (tileset.checkIsTrackTile(target_tile_id)) {
+    if (tileset.isTrackTile(target_tile_id)) {
         var is_valid_move = true;
 
         // If moving down check 1 tile down ( we want to keep a tile rel y pos of 0 before turning )
@@ -193,7 +219,7 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
                 const plus1_y_target_tile_id = map.tile_indicies.items[(@floatToInt(u32, @floor(next_tile_pos.y)) + 1) * board_width_in_tiles + @floatToInt(u32, @floor(next_tile_pos.x))] - 1;
 
                 // Invalidate move
-                if (!tileset.checkIsTrackTile(plus1_y_target_tile_id) and next_tile_pos.y - @floor(next_tile_pos.y) > 0) {
+                if (!tileset.isTrackTile(plus1_y_target_tile_id) and next_tile_pos.y - @floor(next_tile_pos.y) > 0) {
                     is_valid_move = false;
                 }
             }
@@ -205,7 +231,7 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
                 const plus1_x_target_tile_id = map.tile_indicies.items[@floatToInt(u32, @floor(next_tile_pos.y)) * board_width_in_tiles + @floatToInt(u32, @floor(next_tile_pos.x)) + 1] - 1;
 
                 // Invalidate move
-                if (!tileset.checkIsTrackTile(plus1_x_target_tile_id) and next_tile_pos.x - @floor(next_tile_pos.x) > 0) {
+                if (!tileset.isTrackTile(plus1_x_target_tile_id) and next_tile_pos.x - @floor(next_tile_pos.x) > 0) {
                     is_valid_move = false;
                 }
             }
@@ -246,7 +272,7 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
             },
         }
 
-        if ((future_target_tile_id != null) and tileset.checkIsTrackTile(future_target_tile_id.?)) {
+        if ((future_target_tile_id != null) and tileset.isTrackTile(future_target_tile_id.?)) {
             break;
         }
     }
@@ -329,9 +355,6 @@ fn isoInvert(x: f32, y: f32) rl.Vector2 {
     };
 }
 
-//fn towerFromTileCoords(tile_x: i32, tile_y: i32) ?*Tower {
-//}
-
 pub fn main() !void {
     const board_width = sprite_width * board_width_in_tiles * @floatToInt(c_int, scale_factor);
     rl.InitWindow(board_width, boardHeight(), "twr-defns");
@@ -362,6 +385,17 @@ pub fn main() !void {
     var font = rl.LoadFont("assets/PICO-8_mono.ttf");
     defer rl.UnloadFont(font);
 
+    // Load background
+    var bg_image = rl.LoadImage("assets/bg.png");
+
+    var bg_tex_a = rl.LoadTextureFromImage(bg_image);
+    defer rl.UnloadTexture(bg_tex_a);
+
+    rl.UnloadImage(bg_image);
+
+//    Color *LoadImageColors(Image image);                                                               // Load color data from image as a Color array (RGBA - 32bit)
+ //   Color *LoadImagePalette(Image image, int maxPaletteSize, int *colorCount);
+
     // Load tileset
     var tileset: Tileset = undefined;
     tileset.tex = rl.LoadTexture("assets/isosheet.png");
@@ -378,16 +412,24 @@ pub fn main() !void {
         tileset.columns = @intCast(u32, columns_value.Integer);
 
         const tile_data = parsed_tileset_data.root.Object.get("tiles") orelse unreachable;
-        tileset.tile_id_count = @intCast(u8, tile_data.Array.items.len);
-        for (tile_data.Array.items) |tile, tile_index| {
-            const tile_id = tile.Object.get("id") orelse unreachable;
-            const tile_type = tile.Object.get("type") orelse unreachable;
+        var enemy_id_count: u32 = 0;
+        var tower_id_count: u32 = 0;
+        for (tile_data.Array.items) |tile| {
+            var tile_id = tile.Object.get("id") orelse unreachable;
+            var tile_type = tile.Object.get("type") orelse unreachable;
 
             if (std.mem.eql(u8, tile_type.String, "track")) {
-                tileset.track_tile_ids[tile_index] = @intCast(u32, tile_id.Integer);
+                tileset.track_id = @intCast(u32, tile_id.Integer);
             } else if (std.mem.eql(u8, tile_type.String, "track_start")) {
-                tileset.track_tile_ids[tile_index] = @intCast(u32, tile_id.Integer);
                 tileset.track_start_id = @intCast(u32, tile_id.Integer);
+            } else if (std.mem.eql(u8, tile_type.String, "enemy")) {
+                std.debug.assert(enemy_id_count < enemies_data.len);
+                enemies_data[enemy_id_count].tile_id = @intCast(u32, tile_id.Integer);
+                enemy_id_count += 1;
+            } else if (std.mem.eql(u8, tile_type.String, "tower")) {
+                std.debug.assert(tower_id_count < towers_data.len);
+                towers_data[tower_id_count].tile_id = @intCast(u32, tile_id.Integer);
+                tower_id_count += 1;
             } else {
                 unreachable;
             }
@@ -419,34 +461,6 @@ pub fn main() !void {
         board_map.first_gid = @intCast(u32, first_gid.Integer);
     }
 
-    // Store FIRST animation index for each sprite in tile set.
-    // NOTE(caleb): There are 4 animations stored per index in this list. ( up-left, up-right, down-left, down-right)
-    //  where each animation is 4 frames in length.
-    var anim_map: Map = undefined;
-    anim_map.tile_indicies = std.ArrayList(u32).init(ally);
-    defer anim_map.tile_indicies.deinit();
-    {
-        const anim_file = try std.fs.cwd().openFile("assets/anims.tmj", .{});
-        defer anim_file.close();
-        var raw_anim_json = try anim_file.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
-        defer ally.free(raw_anim_json);
-
-        parser.reset();
-        var parsed_anim = try parser.parse(raw_anim_json);
-        var layers = parsed_anim.root.Object.get("layers") orelse unreachable;
-        std.debug.assert(layers.Array.items.len == 1);
-        const layer = layers.Array.items[0];
-        var anim_data = layer.Object.get("data") orelse unreachable;
-        for (anim_data.Array.items) |tile_index| {
-            try anim_map.tile_indicies.append(@intCast(u32, tile_index.Integer));
-        }
-
-        var tilesets = parsed_anim.root.Object.get("tilesets") orelse unreachable;
-        std.debug.assert(tilesets.Array.items.len == 1);
-        const first_gid = tilesets.Array.items[0].Object.get("firstgid") orelse unreachable;
-        anim_map.first_gid = @intCast(u32, first_gid.Integer);
-    }
-
     var debug_projectile = false;
     var debug_origin = false;
     var debug_fps = false;
@@ -468,8 +482,8 @@ pub fn main() !void {
         outer: while (enemy_start_tile_y < board_height_in_tiles) : (enemy_start_tile_y += 1) {
             enemy_start_tile_x = 0;
             while (enemy_start_tile_x < board_width_in_tiles) : (enemy_start_tile_x += 1) {
-                const map_tile_index = board_map.tileIndexFromCoord(enemy_start_tile_x, enemy_start_tile_y) orelse continue;
-                if ((map_tile_index) == tileset.track_start_id) {
+                const ts_id = board_map.tileIDFromCoord(enemy_start_tile_x, enemy_start_tile_y) orelse continue;
+                if ((ts_id) == tileset.track_start_id) {
                     found_enemy_start_tile = true;
                     break :outer;
                 }
@@ -494,10 +508,11 @@ pub fn main() !void {
     var enemies_spawned: u32 = 0;
     while (enemies_spawned < 500) : (enemies_spawned += 1) {
         const newEnemy = Enemy{
+            .kind = EnemyKind.gremlin_wiz_guy,
             .direction = Direction.left,
             .last_step_direction = Direction.left,
             .pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) },
-            .hp = 50,
+            .hp = @intCast(i32, enemies_data[@enumToInt(EnemyKind.gremlin_wiz_guy)].hp),
         };
         try alive_enemies.append(newEnemy);
     }
@@ -543,8 +558,8 @@ pub fn main() !void {
         // Get mouse position
         const mouse_pos = rl.GetMousePosition();
         var selected_tile_pos = isoInvert(@round(mouse_pos.x), @round(mouse_pos.y));
-        const selected_tile_x = @floatToInt(i32, selected_tile_pos.x);
-        const selected_tile_y = @floatToInt(i32, selected_tile_pos.y);
+        const selected_tile_x = @floatToInt(i32, @floor(selected_tile_pos.x));
+        const selected_tile_y = @floatToInt(i32, @floor(selected_tile_pos.y));
 
         if (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_MIDDLE)) {
             // Update origin by last frame's mouse delta
@@ -597,7 +612,7 @@ pub fn main() !void {
                 (selected_tile_x >= 0) and (selected_tile_y >= 0))
             {
                 const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * board_width_in_tiles + selected_tile_x)];
-                if (!tileset.checkIsTrackTile(tile_index)) {
+                if (!tileset.isTrackTile(tile_index)) {
 
                     // OK now considered valid to place a tower but is this tile occupied?
                     var hasTower = false;
@@ -619,7 +634,6 @@ pub fn main() !void {
                             .direction = Direction.down,
                             .tile_x = @intCast(u32, selected_tile_x),
                             .tile_y = @intCast(u32, selected_tile_y),
-//                            .anim_index = anim_map.tile_indicies.items[1],
                         };
                         var did_insert_tower = false;
                         for (towers.items) |tower, tower_index| {
@@ -733,13 +747,29 @@ pub fn main() !void {
         prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
 
         rl.BeginDrawing();
-        rl.ClearBackground(rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 });
+
+//        rl.ClearBackground(rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 });
+        const bg_tex = bg_tex_a;
+
+        const bg_source_rec = rl.Rectangle{
+            .x = 0,
+            .y = 0,
+            .width = @intToFloat(f32, bg_tex.width),
+            .height = @intToFloat(f32, bg_tex.height),
+        };
+        const bg_dest_rec = rl.Rectangle{
+            .x = 0,
+            .y = 0,
+            .width = @intToFloat(f32, rl.GetScreenWidth()),
+            .height = @intToFloat(f32, rl.GetScreenHeight()),
+        };
+        rl.DrawTexturePro(bg_tex, bg_source_rec, bg_dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
 
         var tile_y: i32 = 0;
         while (tile_y < board_height_in_tiles) : (tile_y += 1) {
             var tile_x: i32 = 0;
             while (tile_x < board_width_in_tiles) : (tile_x += 1) {
-                const map_tile_index = board_map.tileIndexFromCoord(@intCast(u32, tile_x), @intCast(u32, tile_y)) orelse continue;
+                const ts_id = board_map.tileIDFromCoord(@intCast(u32, tile_x), @intCast(u32, tile_y)) orelse continue;
                 var dest_pos = isoTransformWithScreenOffset(@intToFloat(f32, tile_x), @intToFloat(f32, tile_y), 0);
                 if (tile_x == selected_tile_x and tile_y == selected_tile_y) {
                     dest_pos.y -= 10;
@@ -752,8 +782,8 @@ pub fn main() !void {
                     .height = sprite_height * scale_factor,
                 };
 
-                const target_tile_row = @divTrunc(map_tile_index, tileset.columns);
-                const target_tile_column = @mod(map_tile_index, tileset.columns);
+                const target_tile_row = @divTrunc(ts_id, tileset.columns);
+                const target_tile_column = @mod(ts_id, tileset.columns);
                 const source_rect = rl.Rectangle{
                     .x = @intToFloat(f32, target_tile_column * sprite_width),
                     .y = @intToFloat(f32, target_tile_row * sprite_height),
@@ -780,7 +810,7 @@ pub fn main() !void {
                         .x = @intToFloat(f32, tower.tile_x),
                         .y = @intToFloat(f32, tower.tile_y),
                     },
-                    .map_tile_index = anim_map.tile_indicies.items[1] + @enumToInt(tower.direction) * 4 + anim_current_frame,
+                    .ts_id = towers_data[@enumToInt(tower.kind)].tile_id + @enumToInt(tower.direction) * 4 + anim_current_frame,
                 };
                 added_entries += 1;
             }
@@ -792,7 +822,7 @@ pub fn main() !void {
                         .x = enemy.pos.x,
                         .y = enemy.pos.y,
                     },
-                    .map_tile_index = anim_map.tile_indicies.items[0] + @enumToInt(enemy.direction) * 4 + anim_current_frame,
+                    .ts_id = enemies_data[@enumToInt(enemy.kind)].tile_id + @enumToInt(enemy.direction) * 4 + anim_current_frame,
                 };
                 added_entries += 1;
             }
@@ -813,8 +843,8 @@ pub fn main() !void {
         }
 
         for (draw_list.items) |entry| {
-            const target_tile_row = @divTrunc(entry.map_tile_index - anim_map.first_gid, tileset.columns);
-            const target_tile_column = @mod(entry.map_tile_index - anim_map.first_gid, tileset.columns);
+            const target_tile_row = @divTrunc(entry.ts_id, tileset.columns);
+            const target_tile_column = @mod(entry.ts_id, tileset.columns);
             const source_rect = rl.Rectangle{
                 .x = @intToFloat(f32, target_tile_column * sprite_width),
                 .y = @intToFloat(f32, target_tile_row * sprite_height),
@@ -862,10 +892,10 @@ pub fn main() !void {
         }
 
         if (is_placing_tower) {
-            // tower_index_being_placed ( would be used to lookup sprite )
-            const map_tile_index = anim_map.tile_indicies.items[1] + @enumToInt(Direction.down) * 4 + anim_current_frame;
-            const target_tile_row = @divTrunc(map_tile_index - anim_map.first_gid, tileset.columns);
-            const target_tile_column = @mod(map_tile_index - anim_map.first_gid, tileset.columns);
+
+            const ts_id = towers_data[tower_index_being_placed].tile_id + @enumToInt(Direction.down) * 4 + anim_current_frame;
+            const target_tile_row = @divTrunc(ts_id, tileset.columns);
+            const target_tile_column = @mod(ts_id, tileset.columns);
             const source_rect = rl.Rectangle{
                 .x = @intToFloat(f32, target_tile_column * sprite_width),
                 .y = @intToFloat(f32, target_tile_row * sprite_height),
@@ -886,21 +916,21 @@ pub fn main() !void {
         {
             rl.DrawRectangleRec(buy_area_rec, color_off_white);
 
-            const map_tile_index = anim_map.tile_indicies.items[1] + @enumToInt(Direction.down) * 4 + anim_current_frame;
-            const target_tile_row = @divTrunc(map_tile_index - anim_map.first_gid, tileset.columns);
-            const target_tile_column = @mod(map_tile_index - anim_map.first_gid, tileset.columns);
-            const source_rect = rl.Rectangle{
-                .x = @intToFloat(f32, target_tile_column * sprite_width),
-                .y = @intToFloat(f32, target_tile_row * sprite_height),
-                .width = sprite_width,
-                .height = sprite_height,
-            };
-
             var row_index: u32 = 0;
             while (row_index < tower_buy_area_rows) : (row_index += 1) {
                 var col_index: u32 = 0;
                 const towers_for_this_row = @min(tower_buy_area_towers_per_row, towers_data.len - row_index * tower_buy_area_towers_per_row);
                 while (col_index < towers_for_this_row) : (col_index += 1) {
+                    const ts_id = towers_data[row_index * towers_for_this_row + col_index].tile_id + @enumToInt(Direction.down) * 4 + anim_current_frame;
+                    const target_tile_row = @divTrunc(ts_id, tileset.columns);
+                    const target_tile_column = @mod(ts_id, tileset.columns);
+                    const source_rect = rl.Rectangle{
+                        .x = @intToFloat(f32, target_tile_column * sprite_width),
+                        .y = @intToFloat(f32, target_tile_row * sprite_height),
+                        .width = sprite_width,
+                        .height = sprite_height,
+                    };
+
                     const tower_buy_item_rec = rl.Rectangle{
                         .x = buy_area_rec.x + @intToFloat(f32, col_index) * tower_buy_item_dim.x,
                         .y = buy_area_rec.y + @intToFloat(f32, row_index) * tower_buy_item_dim.y,
@@ -916,9 +946,9 @@ pub fn main() !void {
 
         // Draw tower info
         //if (selected_tower != null) {
-        //    const map_tile_index = selected_tower.?.anim_index + @enumToInt(selected_tower.?.direction) * 4 + anim_current_frame;
-        //    const target_tile_row = @divTrunc(map_tile_index - anim_map.first_gid, tileset.columns);
-        //    const target_tile_column = @mod(map_tile_index - anim_map.first_gid, tileset.columns);
+        //    const ts_id = selected_tower.?.anim_index + @enumToInt(selected_tower.?.direction) * 4 + anim_current_frame;
+        //    const target_tile_row = @divTrunc(ts_id - anim_map.first_gid, tileset.columns);
+        //    const target_tile_column = @mod(ts_id - anim_map.first_gid, tileset.columns);
         //    const source_rect = rl.Rectangle{
         //        .x = @intToFloat(f32, target_tile_column * sprite_width),
         //        .y = @intToFloat(f32, target_tile_row * sprite_height),
