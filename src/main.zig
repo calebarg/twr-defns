@@ -6,10 +6,12 @@ const initial_scale_factor = 4;
 var scale_factor: f32 = initial_scale_factor;
 var origin = rl.Vector2{ .x = 0, .y = 0 };
 
+const tower_buy_area_sprite_scale = 0.5;
+const tower_buy_area_towers_per_row = 1;
 const projectile_speed = 0.1;
 const max_layers = 5;
 const max_unique_track_tiles = 5;
-const font_size = 15;
+const font_size = 16;
 const font_spacing = 1;
 const board_width_in_tiles = 16;
 const board_height_in_tiles = 16;
@@ -18,11 +20,13 @@ const sprite_height = 32;
 
 // TODO(caleb):
 // *ACTUALLY fix offsets for towers and enemies. Rn I just offset by half sprite's display height ( not ideal ) - bounding boxes?
+// *Grey out tiles in range on place
+// *Treat tiles as draw buffer entries. ( One way to do it would be moving tiles to an array list just like enemies, towers, bullets, etc...)
 
 const anim_frames_speed = 7;
 const enemy_tile_step = 32;
-const enemy_tps = enemy_tile_step * 3; // Enemy tiles per second
-const tower_pps = 5; // Projectiles per second
+const enemy_tps = enemy_tile_step; // Enemy tiles per second
+const tower_pps = 1; // Projectiles per second
 
 const color_off_black = rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 };
 const color_off_white = rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 };
@@ -70,33 +74,75 @@ const Enemy = struct {
     pos: rl.Vector2,
 };
 
-const tower_descs = [_][*c]const u8{
-    "Eye of lauron",
-    "Some say it is an eye.",
+const TowerKind = enum(u32) {
+    floating_eye = 0,
+    placeholder_1,
+    placeholder_2,
+    placeholder_3,
 };
 
-// TODO(caleb): Don't store anim_index inside tower. ( or damage ) ( tower level? )
+const tower_names = [_][*c]const u8{
+    "Floating eye",
+    "Placeholder name",
+    "Placeholder name",
+    "Placeholder name",
+
+};
+
+const tower_descs = [_][*c]const u8{
+    "Some say it is an eye.",
+    "Place holder desc",
+    "Place holder desc",
+    "Place holder desc",
+};
+
+const TowerData = struct {
+    damage: u32,
+    range: u32,
+};
+
+const towers_data = [_]TowerData{
+    TowerData{ // floating eye
+        .damage = 1,
+        .range = 4,
+    },
+    TowerData{ // placeholder
+        .damage = 1,
+        .range = 4,
+    },
+    TowerData{ // placeholder
+        .damage = 1,
+        .range = 4,
+    },
+    TowerData{ // placeholder
+        .damage = 1,
+        .range = 4,
+    },
+};
 
 const Tower = struct {
+    kind: TowerKind,
     direction: Direction,
     tile_x: u32, // TODO(caleb): pos
     tile_y: u32,
-    anim_index: u32,
-    range: u32,
-    damage: u32,
 };
 
 const Projectile = struct {
     direction: rl.Vector2,
+    start: rl.Vector2,
     target: rl.Vector2,
     speed: f32,
     pos: rl.Vector2,
-    tower: *Tower, // NOTE(caleb): Carefull not to create dangling pointers here...
+    damage: u32,
 };
 
 const DrawBufferEntry = struct {
     tile_pos: rl.Vector2,
     map_tile_index: u32,
+};
+
+const Input = struct {
+    l_mouse_button_is_down: bool,
 };
 
 inline fn boundsCheck(x: i32, y: i32) bool {
@@ -237,15 +283,6 @@ fn isoTransform(x: f32, y: f32, z: f32) rl.Vector2 {
     return out;
 }
 
-fn boardDim() rl.Vector2 {
-    const last_tile_pos = isoTransformWithScreenOffset(@intToFloat(f32, board_width_in_tiles - 1),
-             @intToFloat(f32, board_height_in_tiles - 1), 0);
-    return rl.Vector2{
-        .x = last_tile_pos.x,
-        .y = last_tile_pos.y,// + @intToFloat(f32, sprite_height) * scale_factor / 2,
-    };
-}
-
 fn boardHeight() c_int {
     const result = @floatToInt(c_int, isoTransform(@intToFloat(f32, board_width_in_tiles), @intToFloat(f32, board_height_in_tiles), 0).y) + @divTrunc(sprite_height * @floatToInt(c_int, scale_factor), 2);
     return result;
@@ -300,12 +337,11 @@ pub fn main() !void {
     rl.InitWindow(board_width, boardHeight(), "twr-defns");
     rl.SetWindowState(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE);
     rl.SetWindowState(rl.ConfigFlags.FLAG_VSYNC_HINT);
-    rl.SetWindowMinSize(board_width, boardHeight());
     rl.SetTargetFPS(60);
 
     rl.InitAudioDevice();
     defer rl.CloseAudioDevice();
-    rl.SetMasterVolume(1);
+    rl.SetMasterVolume(0);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -413,8 +449,12 @@ pub fn main() !void {
 
     var debug_projectile = false;
     var debug_origin = false;
+    var debug_fps = false;
 
+    var prev_frame_input = Input{.l_mouse_button_is_down = false};
     var selected_tower: ?*Tower = null;
+    var is_placing_tower = false;
+    var tower_index_being_placed: u32 = undefined;
 
     var anim_current_frame: u8 = 0;
     var anim_frames_counter: u8 = 0;
@@ -452,7 +492,7 @@ pub fn main() !void {
 
     // TODO(caleb): spawn timer... also waves.
     var enemies_spawned: u32 = 0;
-    while (enemies_spawned < 10) : (enemies_spawned += 1) {
+    while (enemies_spawned < 500) : (enemies_spawned += 1) {
         const newEnemy = Enemy{
             .direction = Direction.left,
             .last_step_direction = Direction.left,
@@ -494,65 +534,104 @@ pub fn main() !void {
         if (rl.IsKeyPressed(rl.KeyboardKey.KEY_F1)) {
             debug_projectile = !debug_projectile;
             debug_origin = !debug_origin;
+            debug_fps = !debug_fps;
         }
 
         // Scale board depending on mouse wheel change
         scale_factor = clampf32(scale_factor + rl.GetMouseWheelMove(), 1, 10);
 
         // Get mouse position
-        var mouse_pos = rl.GetMousePosition();
+        const mouse_pos = rl.GetMousePosition();
         var selected_tile_pos = isoInvert(@round(mouse_pos.x), @round(mouse_pos.y));
         const selected_tile_x = @floatToInt(i32, selected_tile_pos.x);
         const selected_tile_y = @floatToInt(i32, selected_tile_pos.y);
 
         if (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_MIDDLE)) {
-            // Update origin by last frames mouse delta
+            // Update origin by last frame's mouse delta
             origin = rlm.Vector2Add(origin, rl.GetMouseDelta());
         }
 
-        // Try place tower on selected tile
-        if (rl.IsMouseButtonPressed(rl.MouseButton.MOUSE_BUTTON_LEFT) and
-            (selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
-            (selected_tile_x >= 0) and (selected_tile_y >= 0))
-        {
-            const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * board_width_in_tiles + selected_tile_x)];
-            if (!tileset.checkIsTrackTile(tile_index)) {
+        // Purchasing a tower?
+        const tower_buy_item_dim = rl.Vector2{
+            .x = sprite_width * initial_scale_factor * tower_buy_area_sprite_scale,
+            .y = sprite_height * initial_scale_factor * tower_buy_area_sprite_scale,
+        };
+        const tower_buy_area_rows = @floatToInt(u32, @ceil(@intToFloat(f32, towers_data.len) / tower_buy_area_towers_per_row));
+        const buy_area_rec = rl.Rectangle{
+            .x = @intToFloat(f32, rl.GetScreenWidth()) - tower_buy_item_dim.x * tower_buy_area_towers_per_row,
+            .y = 0,
+            .width = tower_buy_item_dim.x * tower_buy_area_towers_per_row,
+            .height = tower_buy_item_dim.y * @intToFloat(f32, tower_buy_area_rows),
+        };
 
-                // OK now considered valid to place a tower but is this tile occupied?
-                var hasTower = false;
-                for (towers.items) |*tower| {
-                    if ((tower.tile_x == @intCast(u32, selected_tile_x)) and
-                        (tower.tile_y == @intCast(u32, selected_tile_y)))
-                    {
-                        hasTower = true;
-                        selected_tower = tower;
+        if ((!is_placing_tower) and
+            (rl.CheckCollisionPointRec(mouse_pos, buy_area_rec)) and
+            (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)) and
+            (!prev_frame_input.l_mouse_button_is_down)) {
+            var selected_row: u32 = 0;
+            var selected_col: u32 = 0;
+            outer: while (selected_row < tower_buy_area_rows) : (selected_row += 1) {
+                selected_col = 0;
+                const towers_for_this_row = @min(tower_buy_area_towers_per_row, towers_data.len - selected_row * tower_buy_area_towers_per_row);
+                while (selected_col < towers_for_this_row) : (selected_col += 1) {
+                    const tower_buy_item_rec = rl.Rectangle{
+                        .x = buy_area_rec.x + @intToFloat(f32, selected_col) * tower_buy_item_dim.x,
+                        .y = buy_area_rec.y + @intToFloat(f32, selected_row) * tower_buy_item_dim.y,
+                        .width = tower_buy_item_dim.x,
+                        .height = tower_buy_item_dim.y,
+                    };
 
-                        break;
+                    if (rl.CheckCollisionPointRec(mouse_pos, tower_buy_item_rec)) {
+                        is_placing_tower = true;
+                        tower_index_being_placed = selected_row * tower_buy_area_towers_per_row + selected_col;
+                        break :outer;
                     }
                 }
+            }
+        }
 
-                if (!hasTower) {
-                    selected_tower = null;
-                    const new_tower = Tower{
-                        .direction = Direction.down,
-                        .tile_x = @intCast(u32, selected_tile_x),
-                        .tile_y = @intCast(u32, selected_tile_y),
+        if (is_placing_tower and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
+            is_placing_tower = false;
 
-                        // TODO(caleb): decide tower type...
-                        .anim_index = anim_map.tile_indicies.items[1],
-                        .range = 4,
-                        .damage = 1,
-                    };
-                    var did_insert_tower = false;
-                    for (towers.items) |tower, tower_index| {
-                        if (tower.tile_y >= new_tower.tile_y) {
-                            try towers.insert(tower_index, new_tower);
-                            did_insert_tower = true;
+            if ((selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
+                (selected_tile_x >= 0) and (selected_tile_y >= 0))
+            {
+                const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * board_width_in_tiles + selected_tile_x)];
+                if (!tileset.checkIsTrackTile(tile_index)) {
+
+                    // OK now considered valid to place a tower but is this tile occupied?
+                    var hasTower = false;
+                    for (towers.items) |*tower| {
+                        if ((tower.tile_x == @intCast(u32, selected_tile_x)) and
+                            (tower.tile_y == @intCast(u32, selected_tile_y)))
+                        {
+                            hasTower = true;
+                            selected_tower = tower;
+
                             break;
                         }
                     }
-                    if (!did_insert_tower) {
-                        try towers.append(new_tower);
+
+                    if (!hasTower) {
+                        selected_tower = null;
+                        const new_tower = Tower{
+                            .kind = @intToEnum(TowerKind, tower_index_being_placed),
+                            .direction = Direction.down,
+                            .tile_x = @intCast(u32, selected_tile_x),
+                            .tile_y = @intCast(u32, selected_tile_y),
+//                            .anim_index = anim_map.tile_indicies.items[1],
+                        };
+                        var did_insert_tower = false;
+                        for (towers.items) |tower, tower_index| {
+                            if (tower.tile_y >= new_tower.tile_y) {
+                                try towers.insert(tower_index, new_tower);
+                                did_insert_tower = true;
+                                break;
+                            }
+                        }
+                        if (!did_insert_tower) {
+                            try towers.append(new_tower);
+                        }
                     }
                 }
             }
@@ -574,7 +653,7 @@ pub fn main() !void {
                     // Enemy distance < tower range
                     if ((enemy_tile_x - tower_x) * (enemy_tile_x - tower_x) +
                         (enemy_tile_y - tower_y) * (enemy_tile_y - tower_y) <=
-                        (@intCast(i32, tower.range * tower.range)))
+                        (@intCast(i32, towers_data[@enumToInt(tower.kind)].range * towers_data[@enumToInt(tower.kind)].range)))
                     {
                         if (enemy_tile_y < tower.tile_y and enemy_tile_x == tower.tile_x) {
                             tower.direction = Direction.up;
@@ -590,9 +669,10 @@ pub fn main() !void {
                         const new_projectile = Projectile{
                             .direction = rlm.Vector2Normalize(rlm.Vector2Subtract(enemy.pos, tower_pos)),
                             .target = enemy.pos,
+                            .start = tower_pos,
                             .pos = tower_pos,
                             .speed = projectile_speed,
-                            .tower = tower,
+                            .damage = towers_data[@enumToInt(tower.kind)].damage,
                         };
                         try projectiles.append(new_projectile);
 
@@ -627,14 +707,17 @@ pub fn main() !void {
                     {
                         _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
                         projectile_index -= 1;
-                        enemy.hp -= @intCast(i32, projectile.tower.damage);
+                        enemy.hp -= 1;
                         continue :outer;
                     }
 
-                    projectile.pos = rlm.Vector2Add(projectile.pos, rlm.Vector2Scale(projectile.direction, projectile.speed));
                 }
+
+                projectile.pos = rlm.Vector2Add(projectile.pos, rlm.Vector2Scale(projectile.direction, projectile.speed));
             }
         }
+
+        // TODO(caleb): Remove dead enemies ( remove when they have been dead longer than their death animation )
 
         {
             var enemy_index: i32 = 0;
@@ -645,6 +728,9 @@ pub fn main() !void {
                 }
             }
         }
+
+        // Update prev frame input
+        prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
 
         rl.BeginDrawing();
         rl.ClearBackground(rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 });
@@ -694,7 +780,7 @@ pub fn main() !void {
                         .x = @intToFloat(f32, tower.tile_x),
                         .y = @intToFloat(f32, tower.tile_y),
                     },
-                    .map_tile_index = tower.anim_index + @enumToInt(tower.direction) * 4 + anim_current_frame,
+                    .map_tile_index = anim_map.tile_indicies.items[1] + @enumToInt(tower.direction) * 4 + anim_current_frame,
                 };
                 added_entries += 1;
             }
@@ -765,18 +851,42 @@ pub fn main() !void {
             rl.DrawRectanglePro(dest_rect, .{ .x = 0, .y = 0 }, 0, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
 
             if (debug_projectile) {
-                const tower_pos = rl.Vector2{
-                    .x = @intToFloat(f32, projectile.tower.*.tile_x),
-                    .y = @intToFloat(f32, projectile.tower.*.tile_y),
+                const start_pos = rl.Vector2{
+                    .x = projectile.start.x,
+                    .y = projectile.start.y,
                 };
-                var projected_start = isoProjectProjectile(tower_pos);
+                var projected_start = isoProjectProjectile(start_pos);
                 var projected_end = isoProjectProjectile(projectile.target);
                 rl.DrawLineV(projected_start, projected_end, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
             }
         }
 
-        if (selected_tower != null) {
-            const map_tile_index = selected_tower.?.anim_index + @enumToInt(selected_tower.?.direction) * 4 + anim_current_frame;
+        if (is_placing_tower) {
+            // tower_index_being_placed ( would be used to lookup sprite )
+            const map_tile_index = anim_map.tile_indicies.items[1] + @enumToInt(Direction.down) * 4 + anim_current_frame;
+            const target_tile_row = @divTrunc(map_tile_index - anim_map.first_gid, tileset.columns);
+            const target_tile_column = @mod(map_tile_index - anim_map.first_gid, tileset.columns);
+            const source_rect = rl.Rectangle{
+                .x = @intToFloat(f32, target_tile_column * sprite_width),
+                .y = @intToFloat(f32, target_tile_row * sprite_height),
+                .width = sprite_width,
+                .height = sprite_height,
+            };
+            const dest_rect = rl.Rectangle{
+                .x = mouse_pos.x,
+                .y = mouse_pos.y,
+                .width = sprite_width * scale_factor,
+                .height = sprite_height * scale_factor,
+            };
+
+            rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+        }
+
+        // Draw tower buy area
+        {
+            rl.DrawRectangleRec(buy_area_rec, color_off_white);
+
+            const map_tile_index = anim_map.tile_indicies.items[1] + @enumToInt(Direction.down) * 4 + anim_current_frame;
             const target_tile_row = @divTrunc(map_tile_index - anim_map.first_gid, tileset.columns);
             const target_tile_column = @mod(map_tile_index - anim_map.first_gid, tileset.columns);
             const source_rect = rl.Rectangle{
@@ -786,29 +896,64 @@ pub fn main() !void {
                 .height = sprite_height,
             };
 
-            const text_dim_a = rl.MeasureTextEx(font, "Name: ", font_size, font_spacing);
-            const text_dim_b = rl.MeasureTextEx(font, tower_descs[0], font_size, font_spacing);
-            const text_dim_c = rl.MeasureTextEx(font, "Desc: ", font_size, font_spacing);
-            const text_dim_d = rl.MeasureTextEx(font, tower_descs[1], font_size, font_spacing);
+            var row_index: u32 = 0;
+            while (row_index < tower_buy_area_rows) : (row_index += 1) {
+                var col_index: u32 = 0;
+                const towers_for_this_row = @min(tower_buy_area_towers_per_row, towers_data.len - row_index * tower_buy_area_towers_per_row);
+                while (col_index < towers_for_this_row) : (col_index += 1) {
+                    const tower_buy_item_rec = rl.Rectangle{
+                        .x = buy_area_rec.x + @intToFloat(f32, col_index) * tower_buy_item_dim.x,
+                        .y = buy_area_rec.y + @intToFloat(f32, row_index) * tower_buy_item_dim.y,
+                        .width = tower_buy_item_dim.x,
+                        .height = tower_buy_item_dim.y,
+                    };
+                    rl.DrawTexturePro(tileset.tex, source_rect, tower_buy_item_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+                    rl.DrawRectangleLinesEx(tower_buy_item_rec, 2, color_off_black);
+                }
 
-            const text_width = @max(rlm.Vector2Add(text_dim_a, text_dim_b).x,
-                rlm.Vector2Add(text_dim_c, text_dim_d).x);
-
-            const pad = 3;
-            const dest_rect = rl.Rectangle{
-                .x = @intToFloat(f32, rl.GetScreenWidth() - @floatToInt(c_int, text_width) - pad - @floatToInt(c_int, sprite_width * initial_scale_factor * 0.30)),
-                .y = pad,
-                .width = sprite_width * initial_scale_factor * 0.30,
-                .height = sprite_height * initial_scale_factor * 0.30,
-            };
-            rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-            rl.DrawRectangleLinesEx(dest_rect, 2, color_off_black);
-
-            rl.DrawTextEx(font, "Name: ", rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad, .y = pad }, font_size, font_spacing, color_off_black);
-            rl.DrawTextEx(font, tower_descs[0], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim_a.x, .y = pad }, font_size, 1, color_off_black);
-            rl.DrawTextEx(font, "Desc: ", rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad, .y = pad * 2 + text_dim_c.y }, font_size, font_spacing, color_off_black);
-            rl.DrawTextEx(font, tower_descs[1], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim_c.x, .y = pad * 2 + text_dim_c.y }, font_size, 1, color_off_black);
+            }
         }
+
+        // Draw tower info
+        //if (selected_tower != null) {
+        //    const map_tile_index = selected_tower.?.anim_index + @enumToInt(selected_tower.?.direction) * 4 + anim_current_frame;
+        //    const target_tile_row = @divTrunc(map_tile_index - anim_map.first_gid, tileset.columns);
+        //    const target_tile_column = @mod(map_tile_index - anim_map.first_gid, tileset.columns);
+        //    const source_rect = rl.Rectangle{
+        //        .x = @intToFloat(f32, target_tile_column * sprite_width),
+        //        .y = @intToFloat(f32, target_tile_row * sprite_height),
+        //        .width = sprite_width,
+        //        .height = sprite_height,
+        //    };
+
+        //    const text_dim_a = rl.MeasureTextEx(font, "Name:", font_size, font_spacing);
+        //    const text_dim_b = rl.MeasureTextEx(font, tower_descs[0], font_size, font_spacing);
+        //    const text_dim_c = rl.MeasureTextEx(font, "Desc:", font_size, font_spacing);
+        //    const text_dim_d = rl.MeasureTextEx(font, tower_descs[1], font_size, font_spacing);
+
+        //    const text_width = @max(rlm.Vector2Add(text_dim_a, text_dim_b).x,
+        //        rlm.Vector2Add(text_dim_c, text_dim_d).x);
+
+        //    const pad = 3;
+        //    const dest_pos = rl.Vector2 {
+        //        .x = @intToFloat(f32, rl.GetScreenWidth() - @floatToInt(c_int, text_width) - pad - @floatToInt(c_int, sprite_width * initial_scale_factor * 0.40)),
+        //        .y = pad,
+        //    };
+        //    const dest_rect = rl.Rectangle{
+        //        .x = dest_pos.x,
+        //        .y = dest_pos.y,
+        //        .width = sprite_width * initial_scale_factor * 0.40,
+        //        .height = sprite_height * initial_scale_factor * 0.40,
+        //    };
+        //    rl.DrawRectangleLines(@floatToInt(c_int, dest_pos.x), @floatToInt(c_int, dest_pos.y), rl.GetScreenWidth() - @floatToInt(c_int, dest_pos.x) - pad , @floatToInt(c_int, dest_rect.height), color_off_black);
+        //    rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+        //    rl.DrawRectangleLinesEx(dest_rect, 2, color_off_black);
+
+        //    rl.DrawTextEx(font, "Name: ", rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad, .y = pad }, font_size, font_spacing, color_off_black);
+        //    rl.DrawTextEx(font, tower_descs[0], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim_a.x, .y = pad }, font_size, 1, color_off_black);
+        //    rl.DrawTextEx(font, "Desc: ", rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad, .y = pad * 2 + text_dim_c.y }, font_size, font_spacing, color_off_black);
+        //    rl.DrawTextEx(font, tower_descs[1], rl.Vector2{ .x = dest_rect.width + dest_rect.x + pad + text_dim_c.x, .y = pad * 2 + text_dim_c.y }, font_size, 1, color_off_black);
+        //}
 
         if (debug_origin) {
             const screen_mid = rl.Vector2{
@@ -816,6 +961,10 @@ pub fn main() !void {
                 .y = @intToFloat(f32, rl.GetScreenHeight()) / 2,
             };
             rl.DrawLineEx(screen_mid, rlm.Vector2Add(screen_mid, origin), 2, rl.Color{ .r = 0, .g = 255, .b = 0, .a = 255 });
+        }
+
+        if (debug_fps) {
+            rl.DrawFPS(0, 0);
         }
 
         rl.EndDrawing();
