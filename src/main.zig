@@ -365,6 +365,7 @@ inline fn startBGPoses() [4]rl.Vector2{
 
 pub fn main() !void {
     const board_width = sprite_width * board_width_in_tiles * @floatToInt(c_int, scale_factor);
+    rl.SetConfigFlags(rl.ConfigFlags.FLAG_MSAA_4X_HINT);
     rl.InitWindow(board_width, boardHeight(), "twr-defns");
     rl.SetWindowState(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE);
     rl.SetWindowState(rl.ConfigFlags.FLAG_VSYNC_HINT);
@@ -394,9 +395,19 @@ pub fn main() !void {
     defer rl.UnloadFont(font);
 
     // Load background
-    const bg_image = rl.LoadImage("assets/bg.png");
-    std.debug.assert(bg_image.format == rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
-    defer rl.UnloadImage(bg_image);
+    var bg_tex = rl.LoadTexture("assets/bg.png");
+    defer rl.UnloadTexture(bg_tex);
+
+    var hor_osc_shader = rl.LoadShader(
+        0, // Probably not important
+        rl.TextFormat("src/hor_osc.fs", @intCast(c_int, 330)) // gls version
+    );
+    defer rl.UnloadShader(hor_osc_shader);
+
+    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"),
+        &@intToFloat(f32, rl.GetScreenWidth()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"),
+        &@intToFloat(f32, rl.GetScreenHeight()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
 
     // Load tileset
     var tileset: Tileset = undefined;
@@ -755,7 +766,12 @@ pub fn main() !void {
 
         if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
             bg_poses = startBGPoses();
-            rl.ImageResize(&bg_image, screen_dim.width, screen_dim.height);
+
+            // Update shader values
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"),
+                &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"),
+                &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
         }
 
         const bg_pos_move = rl.Vector2{.x = 1, .y = -1};
@@ -773,11 +789,6 @@ pub fn main() !void {
             }
         }
 
-        var hor_oscd_bg_image = rl.ImageCopy(bg_image);
-        defer rl.UnloadImage(hor_oscd_bg_image);
-
-        // TODO(caleb): Modify copy of bg_image ( horizontal oscilation )
-
         // Update prev frame input and screen dim.
         prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
         prev_frame_screen_dim = screen_dim;
@@ -789,39 +800,27 @@ pub fn main() !void {
 
         // Background image
         {
-            // Generate texture from modified background image.
-            //var bg_tex = rl.LoadTextureFromImage(bg_image);
-            //defer rl.UnloadTexture(bg_tex);
+            const bg_source_rec = rl.Rectangle{
+                .x = 0,
+                .y = 0,
+                .width = @intToFloat(f32, bg_tex.width),
+                .height = -@intToFloat(f32, bg_tex.height),
+            };
 
-            //const bg_source_rec = rl.Rectangle{
-            //    .x = 0,
-            //    .y = 0,
-            //    .width = @intToFloat(f32, bg_tex.width),
-            //    .height = @intToFloat(f32, bg_tex.height),
-            //};
+            rl.BeginShaderMode(hor_osc_shader);
             for (bg_poses) |bg_pos| {
+                const bg_aest_rec = rl.Rectangle{
+                    .x = bg_pos.x,
+                    .y = bg_pos.y,
+                    .width =  @intToFloat(f32, rl.GetScreenWidth()),
+                    .height = @intToFloat(f32, rl.GetScreenHeight()),
+                };
+                rl.DrawTexturePro(bg_tex, bg_source_rec, bg_aest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+            }
+            rl.EndShaderMode();
 
-                //bg_pos.x,
-                //bg_pos.y,
-
-                var row_index = 0;
-                while (row_index < modified_bg_image.height) : (row_index += 1) {
-                    var col_index = 0;
-                    while (col_index < modified_bg_image.width) : (col_index += 1) {
-
-                    }
-                }
-
-                //const bg_aest_rec = rl.Rectangle{
-                //    .x = bg_pos.x,
-                //    .y = bg_pos.y,
-                //    .width =  @intToFloat(f32, rl.GetScreenWidth()),
-                //    .height = @intToFloat(f32, rl.GetScreenHeight()),
-                //};
-                //rl.DrawTexturePro(bg_tex, bg_source_rec, bg_aest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-                }
-
-                if (debug_bg_scroll) {
+            if (debug_bg_scroll) {
+                for (bg_poses) |bg_pos| {
                     rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x + 30, .y = bg_pos.y}, 3, rl.RED);
                     rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x - 30, .y = bg_pos.y}, 3, rl.RED);
                     rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x, .y = bg_pos.y + 30}, 3, rl.RED);
