@@ -20,7 +20,6 @@ const sprite_height = 32;
 // *ACTUALLY fix offsets for towers and enemies. Rn I just offset by half sprite's display height ( not ideal ) - bounding boxes?
 // *Grey out tiles in range on place
 // *Treat tiles as draw buffer entries. ( One way to do it would be moving tiles to an array list just like enemies, towers, bullets, etc...)
-// *Cool void background effect (behind the board)???
 
 const anim_frames_speed = 7;
 const enemy_tile_step = 32;
@@ -355,6 +354,15 @@ fn isoInvert(x: f32, y: f32) rl.Vector2 {
     };
 }
 
+inline fn startBGPoses() [4]rl.Vector2{
+    return [4]rl.Vector2{
+        rl.Vector2{.x = @intToFloat(f32, -rl.GetScreenWidth()), .y = @intToFloat(f32, -rl.GetScreenHeight())},
+        rl.Vector2{.x = 0, .y = @intToFloat(f32, -rl.GetScreenHeight())},
+        rl.Vector2{.x = @intToFloat(f32, -rl.GetScreenWidth()), .y = 0},
+        rl.Vector2{.x = 0, .y = 0},
+    };
+}
+
 pub fn main() !void {
     const board_width = sprite_width * board_width_in_tiles * @floatToInt(c_int, scale_factor);
     rl.InitWindow(board_width, boardHeight(), "twr-defns");
@@ -382,19 +390,13 @@ pub fn main() !void {
     rl.PlayMusicStream(jam); // NOTE(caleb): start playing here?
 
     // Font
-    var font = rl.LoadFont("assets/PICO-8_mono.ttf");
+    const font = rl.LoadFont("assets/PICO-8_mono.ttf");
     defer rl.UnloadFont(font);
 
     // Load background
-    var bg_image = rl.LoadImage("assets/bg.png");
-
-    var bg_tex_a = rl.LoadTextureFromImage(bg_image);
-    defer rl.UnloadTexture(bg_tex_a);
-
-    rl.UnloadImage(bg_image);
-
-//    Color *LoadImageColors(Image image);                                                               // Load color data from image as a Color array (RGBA - 32bit)
- //   Color *LoadImagePalette(Image image, int maxPaletteSize, int *colorCount);
+    const bg_image = rl.LoadImage("assets/bg.png");
+    std.debug.assert(bg_image.format == rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    defer rl.UnloadImage(bg_image);
 
     // Load tileset
     var tileset: Tileset = undefined;
@@ -464,8 +466,13 @@ pub fn main() !void {
     var debug_projectile = false;
     var debug_origin = false;
     var debug_fps = false;
+    var debug_bg_scroll = false;
 
+    var bg_poses = startBGPoses();
+
+    var prev_frame_screen_dim = rl.Vector2{.x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight())};
     var prev_frame_input = Input{.l_mouse_button_is_down = false};
+
     var selected_tower: ?*Tower = null;
     var is_placing_tower = false;
     var tower_index_being_placed: u32 = undefined;
@@ -550,6 +557,7 @@ pub fn main() !void {
             debug_projectile = !debug_projectile;
             debug_origin = !debug_origin;
             debug_fps = !debug_fps;
+            debug_bg_scroll = !debug_bg_scroll;
         }
 
         // Scale board depending on mouse wheel change
@@ -743,27 +751,84 @@ pub fn main() !void {
             }
         }
 
-        // Update prev frame input
+        const screen_dim = rl.Vector2{.x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight())};
+
+        if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
+            bg_poses = startBGPoses();
+            rl.ImageResize(&bg_image, screen_dim.width, screen_dim.height);
+        }
+
+        const bg_pos_move = rl.Vector2{.x = 1, .y = -1};
+        for (bg_poses) |*bg_pos| {
+            bg_pos.* = rlm.Vector2Add(bg_pos.*, bg_pos_move);
+            if (bg_pos.x > screen_dim.x) {
+                bg_pos.x = -screen_dim.x + (bg_pos.x - screen_dim.x);
+            } else if (bg_pos.x < -screen_dim.x) {
+                bg_pos.x = screen_dim.x - (-screen_dim.x - bg_pos.x);
+            }
+            if (bg_pos.y > screen_dim.y) {
+                bg_pos.y = -screen_dim.y + (bg_pos.y - screen_dim.y);
+            } else if (bg_pos.y < -screen_dim.y) {
+                bg_pos.y = screen_dim.y - (-screen_dim.y - bg_pos.y);
+            }
+        }
+
+        var hor_oscd_bg_image = rl.ImageCopy(bg_image);
+        defer rl.UnloadImage(hor_oscd_bg_image);
+
+        // TODO(caleb): Modify copy of bg_image ( horizontal oscilation )
+
+        // Update prev frame input and screen dim.
         prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
+        prev_frame_screen_dim = screen_dim;
+
+        // ---------- DRAW ----------
 
         rl.BeginDrawing();
+        rl.ClearBackground(color_off_black);
 
-//        rl.ClearBackground(rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 });
-        const bg_tex = bg_tex_a;
+        // Background image
+        {
+            // Generate texture from modified background image.
+            //var bg_tex = rl.LoadTextureFromImage(bg_image);
+            //defer rl.UnloadTexture(bg_tex);
 
-        const bg_source_rec = rl.Rectangle{
-            .x = 0,
-            .y = 0,
-            .width = @intToFloat(f32, bg_tex.width),
-            .height = @intToFloat(f32, bg_tex.height),
-        };
-        const bg_dest_rec = rl.Rectangle{
-            .x = 0,
-            .y = 0,
-            .width = @intToFloat(f32, rl.GetScreenWidth()),
-            .height = @intToFloat(f32, rl.GetScreenHeight()),
-        };
-        rl.DrawTexturePro(bg_tex, bg_source_rec, bg_dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+            //const bg_source_rec = rl.Rectangle{
+            //    .x = 0,
+            //    .y = 0,
+            //    .width = @intToFloat(f32, bg_tex.width),
+            //    .height = @intToFloat(f32, bg_tex.height),
+            //};
+            for (bg_poses) |bg_pos| {
+
+                //bg_pos.x,
+                //bg_pos.y,
+
+                var row_index = 0;
+                while (row_index < modified_bg_image.height) : (row_index += 1) {
+                    var col_index = 0;
+                    while (col_index < modified_bg_image.width) : (col_index += 1) {
+
+                    }
+                }
+
+                //const bg_aest_rec = rl.Rectangle{
+                //    .x = bg_pos.x,
+                //    .y = bg_pos.y,
+                //    .width =  @intToFloat(f32, rl.GetScreenWidth()),
+                //    .height = @intToFloat(f32, rl.GetScreenHeight()),
+                //};
+                //rl.DrawTexturePro(bg_tex, bg_source_rec, bg_aest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+                }
+
+                if (debug_bg_scroll) {
+                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x + 30, .y = bg_pos.y}, 3, rl.RED);
+                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x - 30, .y = bg_pos.y}, 3, rl.RED);
+                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x, .y = bg_pos.y + 30}, 3, rl.RED);
+                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x, .y = bg_pos.y - 30}, 3, rl.RED);
+                }
+            }
+        }
 
         var tile_y: i32 = 0;
         while (tile_y < board_height_in_tiles) : (tile_y += 1) {
