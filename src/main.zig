@@ -404,8 +404,8 @@ pub fn main() !void {
     );
     defer rl.UnloadShader(hor_osc_shader);
 
-    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"), &@intToFloat(f32, rl.GetScreenWidth()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"), &@intToFloat(f32, rl.GetScreenHeight()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_width"), &@intToFloat(f32, rl.GetScreenWidth()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_height"), &@intToFloat(f32, rl.GetScreenHeight()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
 
     // Load tileset
     var tileset: Tileset = undefined;
@@ -775,28 +775,14 @@ pub fn main() !void {
 
         // Update shader
         {
-            // NOTE(caleb): Why? majik numbers :( are these numbers even correct for my render dims?
-            const c1 = 1.0 / screen_dim.x / 2;
-            const c2 = 8.0 * 3.14 / screen_dim.x * 256.0;
-            const c3 = 3.14 / 60.0;
+            const amplitude = screen_dim.x / 128.0;
+            const time_in_seconds = @floatCast(f32, rl.GetTime());
 
-            const amplitude = 1.0;
-            const amplitude_acceleration = 1.0;
-            const frequency = 1.0;
-            const frequency_acceleration = 1.0;
-            const speed = 1.0;
-
-            const t2 = rl.GetFrameTime() * 2;
-            const frame_speed = c3 * speed * rl.GetFrameTime();
-            const frame_amplitude = c1 * (amplitude + amplitude_acceleration * t2);
-            const frame_frequency = c2 * (frequency + (frequency_acceleration * t2));
-
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "frame_speed"), &frame_speed, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "frame_amplitude"), &frame_amplitude, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "frame_frequency"), &frame_frequency, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "time_in_seconds"), &time_in_seconds, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "amplitude"), &amplitude, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
         }
 
-        const bg_pos_move = rl.Vector2{ .x = 1, .y = -1 };
+        const bg_pos_move = rl.Vector2{ .x = 1, .y = -0.5};
         for (bg_poses) |*bg_pos| {
             bg_pos.* = rlm.Vector2Add(bg_pos.*, bg_pos_move);
             if (bg_pos.x > screen_dim.x) {
@@ -818,7 +804,7 @@ pub fn main() !void {
         // -------------------- DRAW --------------------
 
         rl.BeginDrawing();
-        rl.ClearBackground(color_off_black);
+        rl.ClearBackground(color_off_white);
 
         // Background image
         {

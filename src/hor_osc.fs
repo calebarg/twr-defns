@@ -8,31 +8,26 @@ in vec4 fragColor;
 uniform sampler2D texture0;
 uniform vec4 colDiffuse;
 
-uniform float renderWidth;
-uniform float renderHeight;
-
-uniform float frame_speed;
-uniform float frame_amplitude;
-uniform float frame_frequency;
-//uniform float frame_compression;
+uniform float render_width;
+uniform float render_height;
+uniform float time_in_seconds;
+uniform float amplitude;
 
 // Output fragment color
 out vec4 finalColor;
 
 void main()
 {
-    float pixel_x = round(fragTexCoord.x * renderWidth);
-    float pixel_y = round(fragTexCoord.y * renderHeight);
-
-    float offset = round(frame_amplitude * sin(frame_frequency * pixel_y + frame_speed));
-    if (int(pixel_y) % 2 == 0) {
+    float x = round(fragTexCoord.x * render_width);
+    float y = round(fragTexCoord.y * render_height);
+    float offset = round(amplitude * sin(y + time_in_seconds));
+    if (int(y) % 2 == 0) {
         offset = offset * -1;
     }
-    int dx = int(pixel_x + offset) % int(renderWidth);
+    float dx = float(int(x + offset) % int(render_width));
+    vec2 s_pos = vec2(dx / render_width, y / render_height);
 
-    // Figure out where pixel would have been
-    vec2 s_pixel_pos = vec2(pixel_x / renderWidth, pixel_y / renderHeight);
-
-    vec4 texelColor = texture(texture0, s_pixel_pos);
+    vec4 texelColor = texture(texture0, s_pos);
     finalColor = texelColor*colDiffuse;
 }
+
