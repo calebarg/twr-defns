@@ -38,7 +38,8 @@ const Tileset = struct {
     pub inline fn isTrackTile(self: Tileset, target_tile_id: u32) bool {
         var result = false;
         if ((self.track_start_id == target_tile_id) or
-            (self.track_id == target_tile_id)) {
+            (self.track_id == target_tile_id))
+        {
             result = true;
         }
         return result;
@@ -222,8 +223,7 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
                     is_valid_move = false;
                 }
             }
-        }
-        else if (enemy.direction == Direction.right) {
+        } else if (enemy.direction == Direction.right) {
 
             // If not in bounds than don't worry about checking tile.
             if (boundsCheck(@floatToInt(i32, @floor(next_tile_pos.x)) + 1, @floatToInt(i32, @floor(next_tile_pos.y)))) {
@@ -246,9 +246,9 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
     // Choose new direction
     const current_direction = enemy.direction;
     enemy.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.*.direction) + 1, @enumToInt(Direction.right) + 1));
-    while(enemy.direction != current_direction) : (enemy.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.direction) + 1, @enumToInt(Direction.right) + 1))) {
+    while (enemy.direction != current_direction) : (enemy.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.direction) + 1, @enumToInt(Direction.right) + 1))) {
         var future_target_tile_id: ?u32 = null;
-        switch(enemy.direction) {
+        switch (enemy.direction) {
             .right => {
                 if (boundsCheck(@floatToInt(i32, enemy.pos.x) + 1, @floatToInt(i32, enemy.pos.y)) and enemy.last_step_direction != Direction.left) {
                     future_target_tile_id = map.tile_indicies.items[@floatToInt(u32, enemy.pos.y) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x) + 1] - 1;
@@ -259,12 +259,12 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
                     future_target_tile_id = map.tile_indicies.items[@floatToInt(u32, enemy.pos.y) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x) - 1] - 1;
                 }
             },
-           .up => {
+            .up => {
                 if (boundsCheck(@floatToInt(i32, enemy.pos.x), @floatToInt(i32, enemy.pos.y) - 1) and enemy.last_step_direction != Direction.down) {
                     future_target_tile_id = map.tile_indicies.items[(@floatToInt(u32, enemy.pos.y) - 1) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x)] - 1;
                 }
             },
-           .down => {
+            .down => {
                 if (boundsCheck(@floatToInt(i32, enemy.pos.x), @floatToInt(i32, enemy.pos.y) + 1) and enemy.last_step_direction != Direction.up) {
                     future_target_tile_id = map.tile_indicies.items[(@floatToInt(u32, enemy.pos.y) + 1) * board_width_in_tiles + @floatToInt(u32, enemy.pos.x)] - 1;
                 }
@@ -354,12 +354,12 @@ fn isoInvert(x: f32, y: f32) rl.Vector2 {
     };
 }
 
-inline fn startBGPoses() [4]rl.Vector2{
+inline fn startBGPoses() [4]rl.Vector2 {
     return [4]rl.Vector2{
-        rl.Vector2{.x = @intToFloat(f32, -rl.GetScreenWidth()), .y = @intToFloat(f32, -rl.GetScreenHeight())},
-        rl.Vector2{.x = 0, .y = @intToFloat(f32, -rl.GetScreenHeight())},
-        rl.Vector2{.x = @intToFloat(f32, -rl.GetScreenWidth()), .y = 0},
-        rl.Vector2{.x = 0, .y = 0},
+        rl.Vector2{ .x = @intToFloat(f32, -rl.GetScreenWidth()), .y = @intToFloat(f32, -rl.GetScreenHeight()) },
+        rl.Vector2{ .x = 0, .y = @intToFloat(f32, -rl.GetScreenHeight()) },
+        rl.Vector2{ .x = @intToFloat(f32, -rl.GetScreenWidth()), .y = 0 },
+        rl.Vector2{ .x = 0, .y = 0 },
     };
 }
 
@@ -398,16 +398,14 @@ pub fn main() !void {
     var bg_tex = rl.LoadTexture("assets/bg.png");
     defer rl.UnloadTexture(bg_tex);
 
-    var hor_osc_shader = rl.LoadShader(
-        0, // Probably not important
+    // Load background effect shader and do initial config.
+    var hor_osc_shader = rl.LoadShader(0, // Probably not important
         rl.TextFormat("src/hor_osc.fs", @intCast(c_int, 330)) // gls version
     );
     defer rl.UnloadShader(hor_osc_shader);
 
-    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"),
-        &@intToFloat(f32, rl.GetScreenWidth()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"),
-        &@intToFloat(f32, rl.GetScreenHeight()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"), &@intToFloat(f32, rl.GetScreenWidth()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"), &@intToFloat(f32, rl.GetScreenHeight()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
 
     // Load tileset
     var tileset: Tileset = undefined;
@@ -481,8 +479,8 @@ pub fn main() !void {
 
     var bg_poses = startBGPoses();
 
-    var prev_frame_screen_dim = rl.Vector2{.x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight())};
-    var prev_frame_input = Input{.l_mouse_button_is_down = false};
+    var prev_frame_screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
+    var prev_frame_input = Input{ .l_mouse_button_is_down = false };
 
     var selected_tower: ?*Tower = null;
     var is_placing_tower = false;
@@ -537,6 +535,9 @@ pub fn main() !void {
 
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
+
+        // -------------------- UPDATE --------------------
+
         rl.UpdateMusicStream(jam);
 
         anim_frames_counter += 1;
@@ -555,8 +556,7 @@ pub fn main() !void {
             }
 
             var fraction_of_frame = 60 / @intToFloat(f32, enemy_tps);
-            while (fraction_of_frame < 1) : (fraction_of_frame += 60 / @intToFloat(f32, enemy_tps))
-            {
+            while (fraction_of_frame < 1) : (fraction_of_frame += 60 / @intToFloat(f32, enemy_tps)) {
                 for (alive_enemies.items) |*enemy| {
                     updateEnemy(&tileset, &board_map, enemy);
                 }
@@ -601,7 +601,8 @@ pub fn main() !void {
         if ((!is_placing_tower) and
             (rl.CheckCollisionPointRec(mouse_pos, buy_area_rec)) and
             (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)) and
-            (!prev_frame_input.l_mouse_button_is_down)) {
+            (!prev_frame_input.l_mouse_button_is_down))
+        {
             var selected_row: u32 = 0;
             var selected_col: u32 = 0;
             outer: while (selected_row < tower_buy_area_rows) : (selected_row += 1) {
@@ -743,7 +744,6 @@ pub fn main() !void {
                         enemy.hp -= 1;
                         continue :outer;
                     }
-
                 }
 
                 projectile.pos = rlm.Vector2Add(projectile.pos, rlm.Vector2Scale(projectile.direction, projectile.speed));
@@ -762,19 +762,41 @@ pub fn main() !void {
             }
         }
 
-        const screen_dim = rl.Vector2{.x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight())};
+        // TODO(caleb): Hoist me to the top of the update loop. AND USE ME.
+        const screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
 
         if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
             bg_poses = startBGPoses();
 
-            // Update shader values
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"),
-                &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"),
-                &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            // Inform shader of render width and height changes.
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"), &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"), &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
         }
 
-        const bg_pos_move = rl.Vector2{.x = 1, .y = -1};
+        // Update shader
+        {
+            // NOTE(caleb): Why? majik numbers :( are these numbers even correct for my render dims?
+            const c1 = 1.0 / screen_dim.x / 2;
+            const c2 = 8.0 * 3.14 / screen_dim.x * 256.0;
+            const c3 = 3.14 / 60.0;
+
+            const amplitude = 1.0;
+            const amplitude_acceleration = 1.0;
+            const frequency = 1.0;
+            const frequency_acceleration = 1.0;
+            const speed = 1.0;
+
+            const t2 = rl.GetFrameTime() * 2;
+            const frame_speed = c3 * speed * rl.GetFrameTime();
+            const frame_amplitude = c1 * (amplitude + amplitude_acceleration * t2);
+            const frame_frequency = c2 * (frequency + (frequency_acceleration * t2));
+
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "frame_speed"), &frame_speed, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "frame_amplitude"), &frame_amplitude, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "frame_frequency"), &frame_frequency, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+        }
+
+        const bg_pos_move = rl.Vector2{ .x = 1, .y = -1 };
         for (bg_poses) |*bg_pos| {
             bg_pos.* = rlm.Vector2Add(bg_pos.*, bg_pos_move);
             if (bg_pos.x > screen_dim.x) {
@@ -789,11 +811,11 @@ pub fn main() !void {
             }
         }
 
-        // Update prev frame input and screen dim.
+        // Record prev frame input and screen dim.
         prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
         prev_frame_screen_dim = screen_dim;
 
-        // ---------- DRAW ----------
+        // -------------------- DRAW --------------------
 
         rl.BeginDrawing();
         rl.ClearBackground(color_off_black);
@@ -812,7 +834,7 @@ pub fn main() !void {
                 const bg_aest_rec = rl.Rectangle{
                     .x = bg_pos.x,
                     .y = bg_pos.y,
-                    .width =  @intToFloat(f32, rl.GetScreenWidth()),
+                    .width = @intToFloat(f32, rl.GetScreenWidth()),
                     .height = @intToFloat(f32, rl.GetScreenHeight()),
                 };
                 rl.DrawTexturePro(bg_tex, bg_source_rec, bg_aest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
@@ -821,10 +843,10 @@ pub fn main() !void {
 
             if (debug_bg_scroll) {
                 for (bg_poses) |bg_pos| {
-                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x + 30, .y = bg_pos.y}, 3, rl.RED);
-                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x - 30, .y = bg_pos.y}, 3, rl.RED);
-                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x, .y = bg_pos.y + 30}, 3, rl.RED);
-                    rl.DrawLineEx(bg_pos, rl.Vector2{.x = bg_pos.x, .y = bg_pos.y - 30}, 3, rl.RED);
+                    rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x + 30, .y = bg_pos.y }, 3, rl.RED);
+                    rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x - 30, .y = bg_pos.y }, 3, rl.RED);
+                    rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y + 30 }, 3, rl.RED);
+                    rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y - 30 }, 3, rl.RED);
                 }
             }
         }
@@ -956,7 +978,6 @@ pub fn main() !void {
         }
 
         if (is_placing_tower) {
-
             const ts_id = towers_data[tower_index_being_placed].tile_id + @enumToInt(Direction.down) * 4 + anim_current_frame;
             const target_tile_row = @divTrunc(ts_id, tileset.columns);
             const target_tile_column = @mod(ts_id, tileset.columns);
@@ -1004,7 +1025,6 @@ pub fn main() !void {
                     rl.DrawTexturePro(tileset.tex, source_rect, tower_buy_item_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
                     rl.DrawRectangleLinesEx(tower_buy_item_rec, 2, color_off_black);
                 }
-
             }
         }
 
