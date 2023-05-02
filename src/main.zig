@@ -5,11 +5,13 @@ const rlm = @import("raylib-math");
 const initial_scale_factor = 4;
 var scale_factor: f32 = initial_scale_factor;
 var board_translation = rl.Vector2{ .x = 0, .y = 0 };
+var monies: i32 = 100;
 
-const tower_buy_area_sprite_scale = 0.5;
+const target_fps = 60;
+const tower_buy_area_sprite_scale = 0.6;
 const tower_buy_area_towers_per_row = 1;
-const projectile_speed = 0.2;
-const font_size = 16;
+const tba_font_size = 14;
+const font_size = 18;
 const font_spacing = 2;
 const board_width_in_tiles = 16;
 const board_height_in_tiles = 16;
@@ -18,12 +20,8 @@ const sprite_height = 32;
 
 // TODO(caleb):
 // *Treat tiles as draw buffer entries. ( One way to do it would be moving tiles to an array list just like enemies, towers, bullets, etc...)
-// *Have each tower track when it's time to shoot.
 
 const anim_frames_speed = 7;
-const enemy_tile_step = 32;
-const enemy_tps = enemy_tile_step; // Enemy tiles per second
-const tower_pps = 5; // Projectiles per second
 
 const color_off_black = rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 };
 const color_off_white = rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 };
@@ -63,26 +61,33 @@ const Direction = enum(u32) {
     right,
 };
 
-const EnemyKind = enum(u32) {
-    gremlin_wiz_guy = 0,
-};
-
+// NOTE(caleb): Enemy data is read-only ( with exception of tile_id on init ). It is what is used
+//  to determine how to initialize an Enemy.
 const EnemyData = struct {
     hp: u32,
+    move_speed: f32,
     tile_id: u32,
 
     // TODO(caleb): Sprite offset data should be saved as tileset json
     // and read into tileset struct. also applies to TowerData
     sprite_offset_x: u16,
     sprite_offset_y: u16,
+    tile_steps_per_second: u8,
+};
+
+// Where enemy kind can act as an index into enemy data.
+const EnemyKind = enum(u32) {
+    gremlin_wiz_guy = 0,
 };
 
 var enemies_data = [_]EnemyData{
-    EnemyData{
+    EnemyData{ // Gremlin wiz guy
         .hp = 10,
+        .move_speed = 1.0,
         .tile_id = undefined,
         .sprite_offset_x = 10,
         .sprite_offset_y = 14,
+        .tile_steps_per_second = 64,
     },
 };
 
@@ -93,6 +98,10 @@ const Enemy = struct {
     hp: i32,
     pos: rl.Vector2,
     colliders: [2]rl.Rectangle,
+    tile_steps_per_second: u8,
+    tile_step_timer: u8,
+    anim_frame: u8,
+    anim_timer: u8,
 
     // Update collider positions rel to enemy pos.
     fn shiftColliders(self: *Enemy) void {
@@ -113,8 +122,7 @@ const Enemy = struct {
             y_offset += collider.height * scale_factor;
         }
     }
-
-    fn initColliders(self: *Enemy) void {
+fn initColliders(self: *Enemy) void {
         // TODO(caleb): Get hitbox info from tileset json.
 
         self.colliders[0].width = 12; // ~Head
@@ -125,15 +133,6 @@ const Enemy = struct {
 
         self.shiftColliders();
     }
-
-};
-
-const TowerKind = enum(u32) {
-    floating_eye = 0,
-    placeholder_1,
-    placeholder_2,
-    placeholder_3,
-    placeholder_4,
 };
 
 const tower_names = [_][*c]const u8{
@@ -152,12 +151,23 @@ const tower_descs = [_][*c]const u8{
     "Placeholder desc 4",
 };
 
+const TowerKind = enum(u32) {
+    floating_eye = 0,
+    placeholder_1,
+    placeholder_2,
+    placeholder_3,
+    placeholder_4,
+};
+
+// NOTE(caleb): Same idea here as with ^^^ EnemyData ^^^
 const TowerData = struct {
     damage: u32,
-    range: u32,
     tile_id: u32,
+    range: u16,
     sprite_offset_x: u16,
     sprite_offset_y: u16,
+    fire_rate: u8,
+    fire_speed: u8,
 };
 
 var towers_data = [_]TowerData{
@@ -165,8 +175,10 @@ var towers_data = [_]TowerData{
         .sprite_offset_x = 10,
         .sprite_offset_y = 1,
         .damage = 1,
-        .range = 3,
+        .range = 8,
         .tile_id = undefined,
+        .fire_rate = 1,
+        .fire_speed = 4,
     },
     TowerData{ // placeholder 1
         .sprite_offset_x = 4,
@@ -174,6 +186,8 @@ var towers_data = [_]TowerData{
         .damage = 1,
         .range = 4,
         .tile_id = undefined,
+        .fire_rate = 1,
+        .fire_speed = 1,
     },
     TowerData{ // placeholder 2
         .sprite_offset_x = 4,
@@ -181,6 +195,8 @@ var towers_data = [_]TowerData{
         .damage = 1,
         .range = 4,
         .tile_id = undefined,
+        .fire_rate = 1,
+        .fire_speed = 1,
     },
     TowerData{ // placeholder 3
         .sprite_offset_x = 4,
@@ -188,6 +204,8 @@ var towers_data = [_]TowerData{
         .damage = 1,
         .range = 4,
         .tile_id = undefined,
+        .fire_rate = 1,
+        .fire_speed = 1,
     },
     TowerData{ // placeholder 4
         .sprite_offset_x = 4,
@@ -195,6 +213,8 @@ var towers_data = [_]TowerData{
         .damage = 1,
         .range = 4,
         .tile_id = undefined,
+        .fire_rate = 1,
+        .fire_speed = 1,
     },
 };
 
@@ -203,6 +223,11 @@ const Tower = struct {
     direction: Direction,
     tile_x: u32, // TODO(caleb): pos
     tile_y: u32,
+    fire_rate: u8,
+    fire_rate_timer: u8,
+    fire_speed: u8,
+    anim_frame: u8,
+    anim_timer: u8,
 };
 
 const Projectile = struct {
@@ -232,14 +257,6 @@ inline fn boundsCheck(x: i32, y: i32) bool {
     return true;
 }
 
-inline fn movingBackwards(x: f32, y: f32, prev_x: f32, prev_y: f32) bool {
-    return ((x == prev_x) and y == prev_y);
-}
-
-inline fn clampi32(value: i32, min: i32, max: i32) i32 {
-    return @max(min, @min(max, value));
-}
-
 inline fn clampf32(value: f32, min: f32, max: f32) f32 {
     return @max(min, @min(max, value));
 }
@@ -247,13 +264,18 @@ inline fn clampf32(value: f32, min: f32, max: f32) f32 {
 fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
     var move_amt = rl.Vector2{ .x = 0, .y = 0 };
     switch (enemy.*.direction) {
-        .left => move_amt.x -= 1 / @intToFloat(f32, enemy_tile_step),
-        .up => move_amt.y -= 1 / @intToFloat(f32, enemy_tile_step),
-        .down => move_amt.y += 1 / @intToFloat(f32, enemy_tile_step),
-        .right => move_amt.x += 1 / @intToFloat(f32, enemy_tile_step),
+        .left => move_amt.x -= 1 / @intToFloat(f32, enemy.tile_steps_per_second) * enemies_data[@enumToInt(enemy.kind)].move_speed,
+        .up => move_amt.y -= 1 / @intToFloat(f32, enemy.tile_steps_per_second) * enemies_data[@enumToInt(enemy.kind)].move_speed,
+        .down => move_amt.y += 1 / @intToFloat(f32, enemy.tile_steps_per_second) * enemies_data[@enumToInt(enemy.kind)].move_speed,
+        .right => move_amt.x += 1 / @intToFloat(f32, enemy.tile_steps_per_second) * enemies_data[@enumToInt(enemy.kind)].move_speed,
     }
 
+
     const next_tile_pos = rlm.Vector2Add(enemy.pos, move_amt);
+    if (next_tile_pos.y >= 11.0) {
+        const asdf = true;
+        _ = asdf;
+    }
 
     if (!boundsCheck(@floatToInt(i32, @floor(next_tile_pos.x)), @floatToInt(i32, @floor(next_tile_pos.y)))) {
         return;
@@ -272,6 +294,8 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
 
                 // Invalidate move
                 if (!tileset.isTrackTile(plus1_y_target_tile_id) and next_tile_pos.y - @floor(next_tile_pos.y) > 0) {
+                    // Align enemy pos y
+                    enemy.pos.y = @floor(next_tile_pos.y);
                     is_valid_move = false;
                 }
             }
@@ -283,6 +307,8 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
 
                 // Invalidate move
                 if (!tileset.isTrackTile(plus1_x_target_tile_id) and next_tile_pos.x - @floor(next_tile_pos.x) > 0) {
+                    // Align enemy pos x
+                    enemy.pos.x = @floor(next_tile_pos.x);
                     is_valid_move = false;
                 }
             }
@@ -401,12 +427,12 @@ pub fn main() !void {
     rl.InitWindow(board_width, boardHeight(), "twr-defns");
     rl.SetWindowState(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE);
     rl.SetWindowState(rl.ConfigFlags.FLAG_VSYNC_HINT);
-    rl.SetTargetFPS(60);
+    rl.SetTargetFPS(target_fps);
     rl.SetTraceLogLevel(@enumToInt(rl.TraceLogLevel.LOG_WARNING));
 
     rl.InitAudioDevice();
     defer rl.CloseAudioDevice();
-    rl.SetMasterVolume(0.25);
+    rl.SetMasterVolume(1);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -414,22 +440,30 @@ pub fn main() !void {
     var parser = std.json.Parser.init(ally, false);
     defer parser.deinit();
 
-    var push_buffer = try ally.alloc(u8, 1024 * 10);
+    var push_buffer = try ally.alloc(u8, 1024 * 10); // 10kb should be enough.
     defer ally.free(push_buffer);
     var fba = std.heap.FixedBufferAllocator.init(push_buffer);
+
+    // Bring in all the assets
+    var window_icon = rl.LoadImage("assets/icon.png");
+    defer rl.UnloadImage(window_icon);
+    rl.SetWindowIcon(window_icon);
 
     var jam = rl.LoadMusicStream("assets/grasslands.wav");
     jam.looping = true;
     defer rl.UnloadMusicStream(jam);
-    rl.PlayMusicStream(jam); // NOTE(caleb): start playing here?
+    rl.PlayMusicStream(jam);
 
     const shoot_sound = rl.LoadSound("assets/shoot.wav");
+    rl.SetSoundVolume(shoot_sound, 0.5);
     defer rl.UnloadSound(shoot_sound);
 
     const hit_sound = rl.LoadSound("assets/hit.wav");
+    rl.SetSoundVolume(hit_sound, 0.5);
     defer rl.UnloadSound(hit_sound);
 
     const dead_sound = rl.LoadSound("assets/ded.wav");
+    rl.SetSoundVolume(dead_sound, 0.5);
     defer rl.UnloadSound(dead_sound);
 
     const font = rl.LoadFont("assets/PICO-8_mono.ttf");
@@ -526,10 +560,8 @@ pub fn main() !void {
     var is_placing_tower = false;
     var tower_index_being_placed: u32 = undefined;
 
-    var anim_current_frame: u8 = 0;
-    var anim_frames_counter: u8 = 0;
-    var enemy_tps_frame_counter: u32 = 0;
-    var tower_pps_frame_counter: u32 = 0;
+    var tba_anim_frame: u8 = 0;
+    var tba_anim_timer: u8 = 0;
 
     var enemy_start_tile_y: u32 = 0;
     var enemy_start_tile_x: u32 = 0;
@@ -569,6 +601,10 @@ pub fn main() !void {
         new_enemy.last_step_direction = Direction.left;
         new_enemy.pos = rl.Vector2{ .x = @intToFloat(f32, enemy_start_tile_x), .y = @intToFloat(f32, enemy_start_tile_y) };
         new_enemy.hp = @intCast(i32, enemies_data[@enumToInt(EnemyKind.gremlin_wiz_guy)].hp);
+        new_enemy.tile_steps_per_second = enemies_data[@enumToInt(EnemyKind.gremlin_wiz_guy)].tile_steps_per_second;
+        new_enemy.tile_step_timer = 0;
+        new_enemy.anim_frame = 0;
+        new_enemy.anim_timer = 0;
         new_enemy.initColliders();
 
         try alive_enemies.append(new_enemy);
@@ -581,27 +617,15 @@ pub fn main() !void {
 
         rl.UpdateMusicStream(jam);
 
-        anim_frames_counter += 1;
-        if (anim_frames_counter >= @divTrunc(60, anim_frames_speed)) {
-            anim_frames_counter = 0;
-            anim_current_frame += 1;
-            if (anim_current_frame > 3) anim_current_frame = 0; // NOTE(caleb): 3 is frames per animation - 1
-        }
-
-        enemy_tps_frame_counter += 1;
-        if (enemy_tps_frame_counter >= @divTrunc(60, enemy_tps)) {
-            enemy_tps_frame_counter = 0;
-
-            for (alive_enemies.items) |*enemy| {
-                updateEnemy(&tileset, &board_map, enemy);
-            }
-
-            var fraction_of_frame = 60 / @intToFloat(f32, enemy_tps);
-            while (fraction_of_frame < 1) : (fraction_of_frame += 60 / @intToFloat(f32, enemy_tps)) {
-                for (alive_enemies.items) |*enemy| {
-                    updateEnemy(&tileset, &board_map, enemy);
-                }
-            }
+        // Tower buy area frame counter
+        // NOTE(caleb): Wrap anim logic in a function if I get any more things that
+        //  need animations.
+        tba_anim_timer += 1;
+        if (tba_anim_timer >= @divTrunc(target_fps, anim_frames_speed)) {
+            tba_anim_timer = 0;
+            tba_anim_frame += 1;
+            if (tba_anim_frame > 3) tba_anim_frame = 0; // NOTE(caleb): 3 is frames per animation - 1
+                                                        // where all sprites have 4 anims per facing direction.
         }
 
         // F1 to enable debugging
@@ -612,6 +636,8 @@ pub fn main() !void {
             debug_hit_boxes = !debug_hit_boxes;
             debug_text_info = !debug_text_info;
         }
+
+        const screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
 
         // Scale board depending on mouse wheel change
         scale_factor = clampf32(scale_factor + rl.GetMouseWheelMove(), 1, 10);
@@ -634,7 +660,7 @@ pub fn main() !void {
         };
         const tower_buy_area_rows = @floatToInt(u32, @ceil(@intToFloat(f32, towers_data.len) / tower_buy_area_towers_per_row));
         const buy_area_rec = rl.Rectangle{
-            .x = @intToFloat(f32, rl.GetScreenWidth()) - tower_buy_item_dim.x * tower_buy_area_towers_per_row,
+            .x = screen_dim.x - tower_buy_item_dim.x * tower_buy_area_towers_per_row,
             .y = 0,
             .width = tower_buy_item_dim.x * tower_buy_area_towers_per_row,
             .height = tower_buy_item_dim.y * @intToFloat(f32, tower_buy_area_rows),
@@ -703,6 +729,11 @@ pub fn main() !void {
                         .direction = Direction.down,
                         .tile_x = @intCast(u32, selected_tile_x),
                         .tile_y = @intCast(u32, selected_tile_y),
+                        .fire_rate = towers_data[tower_index_being_placed].fire_rate,
+                        .fire_speed = towers_data[tower_index_being_placed].fire_speed,
+                        .fire_rate_timer = 0,
+                        .anim_frame = 0,
+                        .anim_timer = 0,
                     };
                     var did_insert_tower = false;
                     for (towers.items) |tower, tower_index| {
@@ -719,12 +750,18 @@ pub fn main() !void {
             }
         }
 
-        tower_pps_frame_counter += 1; // do this a per tower basis
-        if (tower_pps_frame_counter >= @divTrunc(60, tower_pps)) {
-            tower_pps_frame_counter = 0;
-
-            // Update each tower
-            for (towers.items) |*tower| {
+        // Update each tower
+        for (towers.items) |*tower| {
+            tower.anim_timer += 1;
+            if (tower.anim_timer >= @divTrunc(target_fps, anim_frames_speed)) {
+                tower.anim_timer = 0;
+                tower.anim_frame += 1;
+                if (tower.anim_frame > 3)
+                    tower.anim_frame = 0;
+            }
+            tower.fire_rate_timer += 1;
+            if (tower.fire_rate_timer >= @divTrunc(target_fps, tower.fire_rate)) {
+                tower.fire_rate_timer = 0;
                 for (alive_enemies.items) |*enemy| {
                     const enemy_tile_x = @floatToInt(i32, @floor(enemy.pos.x));
                     const enemy_tile_y = @floatToInt(i32, @floor(enemy.pos.y));
@@ -757,15 +794,38 @@ pub fn main() !void {
                             .target = tile_space_target,
                             .start = tile_space_start,
                             .pos = tile_space_start,
-                            .speed = projectile_speed,
+                            .speed = @intToFloat(f32, tower.fire_speed) / target_fps,
                             .damage = towers_data[@enumToInt(tower.kind)].damage,
                         };
                         try projectiles.append(new_projectile);
 
-                        rl.PlaySound(shoot_sound);
+//                        rl.PlaySound(shoot_sound);
 
                         break;
                     }
+                }
+            }
+        }
+
+        // Enemy updates
+        for (alive_enemies.items) |*enemy| {
+            enemy.anim_timer += 1;
+            if (enemy.anim_timer >= @divTrunc(target_fps, anim_frames_speed)) {
+                enemy.anim_timer = 0;
+                enemy.anim_frame += 1;
+                if (enemy.anim_frame > 3)
+                    enemy.anim_frame = 0;
+            }
+            enemy.tile_step_timer += 1;
+            if (enemy.tile_step_timer >= @divTrunc(target_fps, enemy.tile_steps_per_second)) {
+                enemy.tile_step_timer = 0;
+
+                updateEnemy(&tileset, &board_map, enemy);
+
+                // Update n times when stepping > target_fps times per frame.
+                var fraction_of_frame = target_fps / @intToFloat(f32, enemy.tile_steps_per_second);
+                while (fraction_of_frame < 1) : (fraction_of_frame += target_fps / @intToFloat(f32, enemy.tile_steps_per_second)) {
+                    updateEnemy(&tileset, &board_map, enemy);
                 }
             }
         }
@@ -779,7 +839,7 @@ pub fn main() !void {
                 // Remove projectile if it is far enough away from the board.
                 if ((@floor(projectile.pos.x) > board_width_in_tiles * 2) or
                     (@floor(projectile.pos.y) > board_height_in_tiles * 2) or
-                    (projectile.pos.x < board_width_in_tiles * -1) or (projectile.pos.y < board_height_in_tiles * -1))
+                    (projectile.pos.x < -board_width_in_tiles) or (projectile.pos.y < -board_height_in_tiles))
                 {
                     _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
                     projectile_index -= 1;
@@ -789,7 +849,7 @@ pub fn main() !void {
                 // Projectile hit enemy
                 for (alive_enemies.items) |*enemy| { // ( spatial partitioning? ) frames are still fine
                     for (enemy.colliders) |collider| {
-                        const projected_collider_pos = isoProject(collider.x, collider.y, 1});
+                        const projected_collider_pos = isoProject(collider.x, collider.y, 1);
                         const projected_collider_rec = rl.Rectangle{
                             .x = projected_collider_pos.x,
                             .y = projected_collider_pos.y,
@@ -827,16 +887,19 @@ pub fn main() !void {
         {
             var enemy_index: i32 = 0;
             while (enemy_index < alive_enemies.items.len) : (enemy_index += 1) {
-                if (alive_enemies.items[@intCast(u32, enemy_index)].hp <= 0) {
+                const enemy = alive_enemies.items[@intCast(u32, enemy_index)];
+                if (enemy.hp <= 0) {
+                    // Handle death stuff now
+                    rl.PlaySound(dead_sound);
+
+                    monies += @intCast(i32, @enumToInt(enemy.kind)) + 1;
+
+                    // Don't read from enemy below this line.
                     try dead_enemies.append(alive_enemies.orderedRemove(@intCast(u32, enemy_index)));
                     enemy_index -= 1;
-                    rl.PlaySound(dead_sound);
                 }
             }
         }
-
-        // TODO(caleb): Hoist me to the top of the update loop. AND USE ME.
-        const screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
 
         if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
             bg_poses = startBGPoses();
@@ -872,7 +935,6 @@ pub fn main() !void {
         // -------------------- DRAW --------------------
 
         rl.BeginDrawing();
-//        rl.ClearBackground(color_off_black);
 
         // Background image
         {
@@ -888,8 +950,8 @@ pub fn main() !void {
                 const bg_aest_rec = rl.Rectangle{
                     .x = bg_pos.x,
                     .y = bg_pos.y,
-                    .width = @intToFloat(f32, rl.GetScreenWidth()),
-                    .height = @intToFloat(f32, rl.GetScreenHeight()),
+                    .width = screen_dim.x,
+                    .height = screen_dim.y,
                 };
                 rl.DrawTexturePro(bg_tex, bg_source_rec, bg_aest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
             }
@@ -962,7 +1024,7 @@ pub fn main() !void {
                         .x = @intToFloat(f32, tower.tile_x),
                         .y = @intToFloat(f32, tower.tile_y),
                     },
-                    .ts_id = towers_data[@enumToInt(tower.kind)].tile_id + @enumToInt(tower.direction) * 4 + anim_current_frame,
+                    .ts_id = towers_data[@enumToInt(tower.kind)].tile_id + @enumToInt(tower.direction) * 4 + tower.anim_frame,
                 };
                 added_entries += 1;
             }
@@ -976,7 +1038,7 @@ pub fn main() !void {
                         .x = enemy.pos.x,
                         .y = enemy.pos.y,
                     },
-                    .ts_id = enemies_data[@enumToInt(enemy.kind)].tile_id + @enumToInt(enemy.direction) * 4 + anim_current_frame,
+                    .ts_id = enemies_data[@enumToInt(enemy.kind)].tile_id + @enumToInt(enemy.direction) * 4 + enemy.anim_frame,
                 };
                 added_entries += 1;
             }
@@ -1061,7 +1123,7 @@ pub fn main() !void {
         }
 
         if (is_placing_tower) {
-            const ts_id = towers_data[tower_index_being_placed].tile_id + @enumToInt(Direction.down) * 4 + anim_current_frame;
+            const ts_id = towers_data[tower_index_being_placed].tile_id + @enumToInt(Direction.down) * 4 + tba_anim_frame;
             const target_tile_row = @divTrunc(ts_id, tileset.columns);
             const target_tile_column = @mod(ts_id, tileset.columns);
             const source_rect = rl.Rectangle{
@@ -1084,6 +1146,7 @@ pub fn main() !void {
 
         // Draw tower buy area
         {
+            var strz_buffer: [256]u8 = undefined;
             rl.DrawRectangleRec(buy_area_rec, color_off_white);
 
             var row_index: u32 = 0;
@@ -1091,7 +1154,7 @@ pub fn main() !void {
                 var col_index: u32 = 0;
                 const towers_for_this_row = @min(tower_buy_area_towers_per_row, towers_data.len - row_index * tower_buy_area_towers_per_row);
                 while (col_index < towers_for_this_row) : (col_index += 1) {
-                    const ts_id = towers_data[row_index * towers_for_this_row + col_index].tile_id + @enumToInt(Direction.down) * 4 + anim_current_frame;
+                    const ts_id = towers_data[row_index * towers_for_this_row + col_index].tile_id + @enumToInt(Direction.down) * 4 + tba_anim_frame;
                     const target_tile_row = @divTrunc(ts_id, tileset.columns);
                     const target_tile_column = @mod(ts_id, tileset.columns);
                     const source_rect = rl.Rectangle{
@@ -1108,32 +1171,64 @@ pub fn main() !void {
                         .height = tower_buy_item_dim.y,
                     };
                     rl.DrawTexturePro(tileset.tex, source_rect, tower_buy_item_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+
+                    const cost_bottom_pad_px = 2;
+                    const cost_strz = try std.fmt.bufPrintZ(&strz_buffer, "${d}", .{200});
+                    const cost_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, cost_strz), tba_font_size, font_spacing);
+                    const cost_strz_pos = rl.Vector2{
+                        .x = buy_area_rec.x + @intToFloat(f32, col_index) * tower_buy_item_dim.x + (tower_buy_item_dim.x - cost_strz_dim.x) / 2,
+                        .y = buy_area_rec.y + @intToFloat(f32, row_index) * tower_buy_item_dim.y + (tower_buy_item_dim.y - cost_strz_dim.y - cost_bottom_pad_px),
+                    };
+                    rl.DrawRectangleV(cost_strz_pos, cost_strz_dim, rl.Color{.r = color_off_white.r, .g = color_off_white.g, .b = color_off_white.b, .a = 210});
+                    rl.DrawTextEx(font, @ptrCast([*c]const u8, cost_strz), cost_strz_pos, tba_font_size, font_spacing, color_off_black);
                     rl.DrawRectangleLinesEx(tower_buy_item_rec, 2, color_off_black);
                 }
             }
         }
 
+        { // Draw money amt
+            var strz_buffer: [256]u8 = undefined;
+            const money_strz = try std.fmt.bufPrintZ(&strz_buffer, "Money: ${d}", .{monies});
+            const money_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, money_strz), font_size, font_spacing);
+
+            const money_rec = rl.Rectangle{
+                .x = 0,
+                .y = 0,
+                .width = money_strz_dim.x + 3,
+                .height = money_strz_dim.y + 6,
+            };
+            rl.DrawRectangleRec(money_rec, color_off_white);
+            rl.DrawTextEx(font, @ptrCast([*c]const u8, money_strz), rl.Vector2{ .x = 3, .y = 3}, font_size, font_spacing, color_off_black);
+            rl.DrawRectangleLinesEx(money_rec, 2, color_off_black);
+        }
+
         if (debug_text_info) {
             var strz_buffer: [256]u8 = undefined;
-            const tower_count_strz = try std.fmt.bufPrintZ(&strz_buffer, "Tower count: {d}", .{towers.items.len});
-            const text_dim_a = rl.MeasureTextEx(font, @ptrCast([*c]const u8, tower_count_strz), font_size, font_spacing);
-            rl.DrawTextEx(font, @ptrCast([*c]const u8, tower_count_strz), rl.Vector2{ .x = 0, .y = screen_dim.y -  text_dim_a.y}, font_size, font_spacing, rl.Color{.r = 255, .g = 0, .b = 0, .a = 255});
+            var y_offset: f32 = 0;
 
             const fps_strz = try std.fmt.bufPrintZ(&strz_buffer, "FPS: {d}", .{rl.GetFPS()});
-            const text_dim_b = rl.MeasureTextEx(font, @ptrCast([*c]const u8, fps_strz), font_size, font_spacing);
-            rl.DrawTextEx(font, @ptrCast([*c]const u8, fps_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - text_dim_a.y - text_dim_b.y}, font_size, font_spacing, rl.Color{.r = 255, .g = 0, .b = 0, .a = 255});
+            y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, fps_strz), font_size, font_spacing).y;
+            rl.DrawTextEx(font, @ptrCast([*c]const u8, fps_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset}, font_size, font_spacing, rl.Color{.r = 255, .g = 0, .b = 0, .a = 255});
+
+            const tower_count_strz = try std.fmt.bufPrintZ(&strz_buffer, "Tower count: {d}", .{towers.items.len});
+            y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, tower_count_strz), font_size, font_spacing).y;
+            rl.DrawTextEx(font, @ptrCast([*c]const u8, tower_count_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset}, font_size, font_spacing, rl.Color{.r = 255, .g = 0, .b = 0, .a = 255});
 
             const mouse_tile_space_strz = try std.fmt.bufPrintZ(&strz_buffer, "Tile-space pos: ({d:.2}, {d:.2})", .{selected_tile_pos.x, selected_tile_pos.y});
-            const text_dim_c = rl.MeasureTextEx(font, @ptrCast([*c]const u8, mouse_tile_space_strz), font_size, font_spacing);
-            rl.DrawTextEx(font, @ptrCast([*c]const u8, mouse_tile_space_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - text_dim_a.y - text_dim_b.y - text_dim_c.y}, font_size, font_spacing, rl.Color{.r = 255, .g = 0, .b = 0, .a = 255});
+            y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, mouse_tile_space_strz), font_size, font_spacing).y;
+            rl.DrawTextEx(font, @ptrCast([*c]const u8, mouse_tile_space_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset}, font_size, font_spacing, rl.Color{.r = 255, .g = 0, .b = 0, .a = 255});
+
+            const projectile_count_strz = try std.fmt.bufPrintZ(&strz_buffer, "Projectile count: {d}", .{projectiles.items.len});
+            y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, projectile_count_strz), font_size, font_spacing).y;
+            rl.DrawTextEx(font, @ptrCast([*c]const u8, projectile_count_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset}, font_size, font_spacing, rl.Color{.r = 255, .g = 0, .b = 0, .a = 255});
         }
 
         // Draw tower info
-        if (selected_tower != null) {
-            var tower_info_buffer: [256]u8 = undefined;
-            const tower_tile_pos_strz = try std.fmt.bufPrintZ(&tower_info_buffer, "Tile pos: ({d}, {d})", .{selected_tower.?.tile_x, selected_tower.?.tile_y});
-            rl.DrawTextEx(font, @ptrCast([*c]const u8, tower_tile_pos_strz), rl.Vector2{ .x = 0, .y = 0 }, font_size, font_spacing, rl.Color{.r = 0, .g = 255, .b = 0, .a = 255});
-        }
+        //if (selected_tower != null) {
+        //    var tower_info_buffer: [256]u8 = undefined;
+        //    const tower_tile_pos_strz = try std.fmt.bufPrintZ(&tower_info_buffer, "Tile pos: ({d}, {d})", .{selected_tower.?.tile_x, selected_tower.?.tile_y});
+        //    rl.DrawTextEx(font, @ptrCast([*c]const u8, tower_tile_pos_strz), rl.Vector2{ .x = 0, .y = 0 }, font_size, font_spacing, rl.Color{.r = 0, .g = 255, .b = 0, .a = 255});
+        //}
 
         if (debug_origin) {
             const screen_mid = rl.Vector2{
