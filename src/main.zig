@@ -8,7 +8,9 @@ const ArrayList = std.ArrayList;
 const initial_scale_factor = 4;
 var scale_factor: f32 = initial_scale_factor;
 var board_translation = rl.Vector2{ .x = 0, .y = 0 };
-var monies: i32 = 100;
+
+// Game state
+var money: i32 = 100;
 var hp: i32 = 100;
 var score: u32 = 0;
 var round: u32 = 0;
@@ -66,7 +68,7 @@ const Map = struct {
     }
 };
 
-const GameState = enum {
+const GameMode = enum {
     title_screen,
     running,
     game_over,
@@ -96,12 +98,27 @@ const EnemyData = struct {
 // Where enemy kind can act as an index into enemy data.
 const EnemyKind = enum(u32) {
     gremlin_wiz_guy = 0,
+
+    count,
 };
+
+const GroupSpawnData = struct {
+    kind: EnemyKind,
+    spawn_count: u32,
+    time_between_spawns_ms: u16,
+};
+
+const RoundSpawns = struct {
+    group_spawn_data: [@enumToInt(EnemyKind.count)]GroupSpawnData,
+    unique_enemies_for_this_round: u8,
+};
+
+var round_spawn_data: [60]RoundSpawns = undefined;
 
 var enemies_data = [_]EnemyData{
     EnemyData{ // Gremlin wiz guy
         .hp = 1,
-        .move_speed = 40.0,
+        .move_speed = 1.0,
         .tile_id = undefined,
         .sprite_offset_x = 10,
         .sprite_offset_y = 14,
@@ -510,11 +527,7 @@ fn drawBackground(screen_dim: rl.Vector2, debug_bg_scroll: bool, bg_poses: *[4]r
     }
 }
 
-fn drawSprites(fba: *FixedBufferAllocator, tileset: *Tileset, debug_hit_boxes: bool,
-    debug_projectile: bool, towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy),
-    projectiles: *ArrayList(Projectile), selected_tile_x: i32, selected_tile_y: i32,
-    tower_index_being_placed: i32, tba_anim_frame: u8) !void {
-
+fn drawSprites(fba: *FixedBufferAllocator, tileset: *Tileset, debug_hit_boxes: bool, debug_projectile: bool, towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy), projectiles: *ArrayList(Projectile), selected_tile_x: i32, selected_tile_y: i32, tower_index_being_placed: i32, tba_anim_frame: u8) !void {
     fba.reset();
     var draw_list = std.ArrayList(DrawBufferEntry).init(fba.allocator());
 
@@ -679,12 +692,11 @@ inline fn drawDebugOrigin(screen_mid: rl.Vector2, debug_origin: bool) void {
 }
 
 inline fn drawStatusBar(font: *rl.Font) !void {
-
     var strz_buffer: [256]u8 = undefined;
     var info_box_width: f32 = 0;
     const xy_pad_in_pixels = 10;
 
-    var money_strz = try std.fmt.bufPrintZ(&strz_buffer, "MONEY:${d}", .{monies});
+    var money_strz = try std.fmt.bufPrintZ(&strz_buffer, "MONEY:${d}", .{money});
     const byte_offset = std.zig.c_builtins.__builtin_strlen(@ptrCast([*c]const u8, money_strz)) + 1;
     const money_strz_dim = rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, money_strz), default_font_size, font_spacing);
     info_box_width += money_strz_dim.x;
@@ -703,6 +715,15 @@ inline fn drawStatusBar(font: *rl.Font) !void {
     rl.DrawRectangleLinesEx(info_rec, 2, color_off_black);
     rl.DrawTextEx(font.*, @ptrCast([*c]const u8, money_strz), rl.Vector2{ .x = xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
     rl.DrawTextEx(font.*, @ptrCast([*c]const u8, hp_strz), rl.Vector2{ .x = money_strz_dim.x + xy_pad_in_pixels + xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
+}
+
+inline fn resetGameState(towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy), dead_enemies: *ArrayList(Enemy)) void {
+    towers.clearRetainingCapacity();
+    alive_enemies.clearRetainingCapacity();
+    dead_enemies.clearRetainingCapacity();
+    hp = 100;
+    score = 0;
+    round = 0;
 }
 
 pub fn main() !void {
@@ -800,7 +821,7 @@ pub fn main() !void {
                 tower_id_count += 1;
             } else if (std.mem.eql(u8, tile_type.String, "retry_button")) {
                 tileset.retry_button_id = @intCast(u32, tile_id.Integer);
-            }  else if (std.mem.eql(u8, tile_type.String, "quit_button")) {
+            } else if (std.mem.eql(u8, tile_type.String, "quit_button")) {
                 tileset.quit_button_id = @intCast(u32, tile_id.Integer);
             } else if (std.mem.eql(u8, tile_type.String, "menu_button")) {
                 tileset.menu_button_id = @intCast(u32, tile_id.Integer);
@@ -835,13 +856,39 @@ pub fn main() !void {
         board_map.first_gid = @intCast(u32, first_gid.Integer);
     }
 
+    // Read in round data
+    {
+        const round_info_file = try std.fs.cwd().openFile("assets/round_info.json", .{});
+        defer round_info_file.close();
+        var round_info_json = try round_info_file.reader().readAllAlloc(ally, 1024 * 10);
+        defer ally.free(round_info_json);
+
+        parser.reset();
+        var parsed_round_info = try parser.parse(round_info_json);
+        const round_spawn_data_property = parsed_round_info.root.Object.get("round_spawn_data") orelse unreachable;
+        for (round_spawn_data_property.Array.items) |group_spawn_data, group_spawn_data_index| {
+            for (group_spawn_data.Array.items) |group_spawn_data_entry, group_spawn_data_entry_index| {
+                const kind = group_spawn_data_entry.Object.get("kind") orelse unreachable;
+                const spawn_count = group_spawn_data_entry.Object.get("spawn_count") orelse unreachable;
+                const time_between_spawns_ms = group_spawn_data_entry.Object.get("time_between_spawns_ms") orelse unreachable;
+
+                round_spawn_data[group_spawn_data_index].group_spawn_data[group_spawn_data_entry_index] = GroupSpawnData{
+                    .kind = @intToEnum(EnemyKind, @intCast(u32, kind.Integer)),
+                    .spawn_count = @intCast(u32, spawn_count.Integer),
+                    .time_between_spawns_ms = @intCast(u16, time_between_spawns_ms.Integer),
+                };
+            }
+            round_spawn_data[group_spawn_data_index].unique_enemies_for_this_round = @intCast(u8, group_spawn_data.Array.items.len);
+        }
+    }
+
     var debug_projectile = false;
     var debug_origin = false;
     var debug_bg_scroll = false;
     var debug_hit_boxes = false;
     var debug_text_info = false;
 
-    var game_state = GameState.title_screen;
+    var game_mode = GameMode.title_screen;
 
     var bg_poses = startBGPoses();
 
@@ -883,7 +930,8 @@ pub fn main() !void {
     var projectiles = std.ArrayList(Projectile).init(ally);
     defer projectiles.deinit();
 
-    // TODO(caleb): spawn timer... also waves.
+    // TODO(caleb): spawn timer... also waves. Use round_data... // also force player to start
+    // rounds by clicking a button..?
     var enemies_spawned: u32 = 0;
     while (enemies_spawned < 501) : (enemies_spawned += 1) {
         var new_enemy: Enemy = undefined;
@@ -961,31 +1009,22 @@ pub fn main() !void {
         }
 
         // Game over?
-        if (hp <= 0) game_state = GameState.game_over;
+        if (hp <= 0) game_mode = GameMode.game_over;
 
-        switch (game_state) {
+        switch (game_mode) {
             .title_screen => {
                 // TODO(caleb): Actually make a title screen/stage selector
-                game_state = GameState.running;
+                game_mode = GameMode.running;
             },
             .game_over => {
-                rl.BeginDrawing();
-
-                drawBackground(screen_dim, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
-                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
-                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies,
-                    &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
-                try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
-                drawDebugOrigin(screen_mid, debug_origin);
-                try drawStatusBar(&font);
-
-                const start_y = screen_mid.y + @sin(time_in_seconds * 10) * 5;
-
                 var strz_buffer: [256]u8 = undefined;
                 const game_over_font_size = 18;
+
                 const game_over_strz = try std.fmt.bufPrintZ(&strz_buffer, "GAME OVER!", .{});
                 const game_over_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_font_size, font_spacing);
-                const game_over_strz_pos = rl.Vector2{.x = screen_mid.x - game_over_strz_dim.x / 2, .y = start_y};
+
+                const start_y = screen_mid.y + @sin(time_in_seconds * 10) * 5;
+                const game_over_strz_pos = rl.Vector2{ .x = screen_mid.x - game_over_strz_dim.x / 2, .y = start_y };
 
                 const game_over_popup_rec = rl.Rectangle{
                     .x = screen_mid.x - game_over_strz_dim.x / 2 - (sprite_width * initial_scale_factor * 3 - game_over_strz_dim.x) / 2,
@@ -994,42 +1033,75 @@ pub fn main() !void {
                     .height = game_over_strz_dim.y + sprite_height * initial_scale_factor,
                 };
 
+                var button_dest_recs: [3]rl.Rectangle = undefined;
+                for (button_dest_recs) |*rec, rec_index| {
+                    rec.x = game_over_popup_rec.x + sprite_width * initial_scale_factor * @intToFloat(f32, rec_index);
+                    rec.y = game_over_strz_pos.y + game_over_strz_dim.y;
+                    rec.width = sprite_width * initial_scale_factor;
+                    rec.height = sprite_height * initial_scale_factor;
+
+                    if ((rl.CheckCollisionPointRec(mouse_pos, rec.*)) and
+                        (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)))
+                    {
+                        rec.x += sprite_width * initial_scale_factor * 0.1 / 2.0;
+                        rec.y += sprite_height * initial_scale_factor * 0.1 / 2.0;
+                        rec.width *= 0.9;
+                        rec.height *= 0.9;
+                    }
+
+                    if ((rl.CheckCollisionPointRec(mouse_pos, rec.*)) and
+                        (rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)))
+                    {
+                        if (rec_index == 0) {
+                            resetGameState(&towers, &alive_enemies, &dead_enemies);
+                            game_mode = GameMode.running;
+                        } else if (rec_index == 1) {
+                            resetGameState(&towers, &alive_enemies, &dead_enemies);
+                            game_mode = GameMode.title_screen;
+                        } else if (rec_index == 2) {
+                            // TODO(caleb): Exit
+                        }
+                    }
+                }
+
+                rl.BeginDrawing();
+
+                drawBackground(screen_dim, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
+                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
+                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies, &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
+                try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
+                drawDebugOrigin(screen_mid, debug_origin);
+                try drawStatusBar(&font);
+
                 rl.DrawRectangleRec(game_over_popup_rec, color_off_white);
                 rl.DrawRectangleLinesEx(game_over_popup_rec, 2, color_off_black);
                 rl.DrawTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_strz_pos, game_over_font_size, font_spacing, color_off_black);
 
-                // Retry button
                 var target_tile_row = @divTrunc(tileset.retry_button_id, tileset.columns);
                 var target_tile_column = @mod(tileset.retry_button_id, tileset.columns);
-                var source_rec = rl.Rectangle{
+                var button_source_rec = rl.Rectangle{
                     .x = @intToFloat(f32, target_tile_column * sprite_width),
                     .y = @intToFloat(f32, target_tile_row * sprite_height),
                     .width = sprite_width,
                     .height = sprite_height,
                 };
-                var dest_rec = rl.Rectangle{
-                    .x = game_over_popup_rec.x,
-                    .y = game_over_strz_pos.y + game_over_strz_dim.y,
-                    .width =  sprite_width * initial_scale_factor,
-                    .height = sprite_height * initial_scale_factor,
-                };
-                rl.DrawTexturePro(tileset.tex, source_rec, dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+
+                // Retry button
+                rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[0], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
 
                 // Title screen button
                 target_tile_row = @divTrunc(tileset.menu_button_id, tileset.columns);
                 target_tile_column = @mod(tileset.menu_button_id, tileset.columns);
-                source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
-                source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
-                dest_rec.x += dest_rec.width;
-                rl.DrawTexturePro(tileset.tex, source_rec, dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+                button_source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
+                button_source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
+                rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[1], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
 
                 // Quit button
                 target_tile_row = @divTrunc(tileset.quit_button_id, tileset.columns);
                 target_tile_column = @mod(tileset.quit_button_id, tileset.columns);
-                source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
-                source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
-                dest_rec.x += dest_rec.width;
-                rl.DrawTexturePro(tileset.tex, source_rec, dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+                button_source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
+                button_source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
+                rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[2], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
 
                 rl.EndDrawing();
             },
@@ -1061,7 +1133,8 @@ pub fn main() !void {
                 if ((tower_index_being_placed < 0) and
                     (rl.CheckCollisionPointRec(mouse_pos, buy_area_rec)) and
                     (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)) and
-                    (!prev_frame_input.l_mouse_button_is_down)) {
+                    (!prev_frame_input.l_mouse_button_is_down))
+                {
                     var selected_row: u32 = 0;
                     var selected_col: u32 = 0;
                     outer: while (selected_row < tower_buy_area_rows) : (selected_row += 1) {
@@ -1087,7 +1160,8 @@ pub fn main() !void {
                 var clicked_on_a_tower = false;
                 if (rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
                     if ((selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
-                        (selected_tile_x >= 0) and (selected_tile_y >= 0)) {
+                        (selected_tile_x >= 0) and (selected_tile_y >= 0))
+                    {
                         for (towers.items) |*tower| {
                             if ((tower.tile_x == @intCast(u32, selected_tile_x)) and
                                 (tower.tile_y == @intCast(u32, selected_tile_y)))
@@ -1108,8 +1182,9 @@ pub fn main() !void {
                         (selected_tile_x >= 0) and (selected_tile_y >= 0))
                     {
                         const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * board_width_in_tiles + selected_tile_x)];
-                        if (!tileset.isTrackTile(tile_index) and !clicked_on_a_tower and monies >=
-                            @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost)) {
+                        if (!tileset.isTrackTile(tile_index) and !clicked_on_a_tower and money >=
+                            @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost))
+                        {
                             selected_tower = null;
                             const new_tower = Tower{
                                 .kind = @intToEnum(TowerKind, tower_index_being_placed),
@@ -1133,7 +1208,7 @@ pub fn main() !void {
                             if (!did_insert_tower) {
                                 try towers.append(new_tower);
                             }
-                            monies -= @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost);
+                            money -= @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost);
                         }
                     }
                     tower_index_being_placed = -1;
@@ -1281,7 +1356,7 @@ pub fn main() !void {
                             // Handle death stuff now
                             rl.PlaySound(dead_sound);
 
-                            monies += @intCast(i32, @enumToInt(enemy.kind)) + 1;
+                            money += @intCast(i32, @enumToInt(enemy.kind)) + 1;
 
                             // Don't read from enemy below this line.
                             try dead_enemies.append(alive_enemies.orderedRemove(@intCast(u32, enemy_index)));
@@ -1302,8 +1377,7 @@ pub fn main() !void {
 
                 drawBackground(screen_dim, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
                 drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
-                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies,
-                    &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
+                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies, &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
 
                 // Draw tower buy area
                 {
