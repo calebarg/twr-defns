@@ -40,6 +40,18 @@
         {
          "id":112,
          "type":"tower"
+        }, 
+        {
+         "id":144,
+         "type":"retry_button"
+        }, 
+        {
+         "id":145,
+         "type":"quit_button"
+        }, 
+        {
+         "id":146,
+         "type":"menu_button"
         }],
  "tilewidth":32,
  "type":"tileset",

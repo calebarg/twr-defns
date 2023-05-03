@@ -2,6 +2,9 @@ const std = @import("std");
 const rl = @import("raylib");
 const rlm = @import("raylib-math");
 
+const FixedBufferAllocator = std.heap.FixedBufferAllocator;
+const ArrayList = std.ArrayList;
+
 const initial_scale_factor = 4;
 var scale_factor: f32 = initial_scale_factor;
 var board_translation = rl.Vector2{ .x = 0, .y = 0 };
@@ -13,8 +16,7 @@ var round: u32 = 0;
 const target_fps = 60;
 const tower_buy_area_sprite_scale = 0.7;
 const tower_buy_area_towers_per_row = 1;
-const tba_font_size = 14;
-const font_size = 18;
+const default_font_size = 18;
 const font_spacing = 2;
 const board_width_in_tiles = 16;
 const board_height_in_tiles = 16;
@@ -23,6 +25,8 @@ const sprite_height = 32;
 
 // TODO(caleb):
 // *Treat tiles as draw buffer entries. ( One way to do it would be moving tiles to an array list just like enemies, towers, bullets, etc...)
+// *Money animation ( just need a list of vecs + amt lost or gained ) also do this with health?
+// *HP and money icons
 
 const anim_frames_speed = 7;
 
@@ -30,9 +34,14 @@ const color_off_black = rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 };
 const color_off_white = rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 };
 
 const Tileset = struct {
-    columns: u32,
+    // TODO(caleb): hashmap for specifc id's
     track_start_id: u32,
     track_id: u32,
+    retry_button_id: u32,
+    quit_button_id: u32,
+    menu_button_id: u32,
+
+    columns: u32,
     tex: rl.Texture,
 
     pub inline fn isTrackTile(self: Tileset, target_tile_id: u32) bool {
@@ -92,7 +101,7 @@ const EnemyKind = enum(u32) {
 var enemies_data = [_]EnemyData{
     EnemyData{ // Gremlin wiz guy
         .hp = 1,
-        .move_speed = 1.0,
+        .move_speed = 40.0,
         .tile_id = undefined,
         .sprite_offset_x = 10,
         .sprite_offset_y = 14,
@@ -427,6 +436,275 @@ inline fn startBGPoses() [4]rl.Vector2 {
     };
 }
 
+fn drawBoard(board_map: *Map, tileset: *Tileset, selected_tile_x: i32, selected_tile_y: i32, selected_tower: ?*Tower, tower_index_being_placed: i32) void {
+    var tile_y: i32 = 0;
+    while (tile_y < board_height_in_tiles) : (tile_y += 1) {
+        var tile_x: i32 = 0;
+        while (tile_x < board_width_in_tiles) : (tile_x += 1) {
+            const ts_id = board_map.tileIDFromCoord(@intCast(u32, tile_x), @intCast(u32, tile_y)) orelse continue;
+            var dest_pos = isoProject(@intToFloat(f32, tile_x), @intToFloat(f32, tile_y), 0);
+            if (tile_x == selected_tile_x and tile_y == selected_tile_y) {
+                dest_pos.y -= 4 * scale_factor;
+            }
+
+            const dest_rect = rl.Rectangle{
+                .x = dest_pos.x,
+                .y = dest_pos.y,
+                .width = sprite_width * scale_factor,
+                .height = sprite_height * scale_factor,
+            };
+
+            const target_tile_row = @divTrunc(ts_id, tileset.columns);
+            const target_tile_column = @mod(ts_id, tileset.columns);
+            const source_rect = rl.Rectangle{
+                .x = @intToFloat(f32, target_tile_column * sprite_width),
+                .y = @intToFloat(f32, target_tile_row * sprite_height),
+                .width = sprite_width,
+                .height = sprite_height,
+            };
+
+            var tile_rgb: u8 = 255;
+            if (selected_tower != null) {
+                const range = towers_data[@enumToInt(selected_tower.?.kind)].range;
+                if (std.math.absCast(tile_x - @intCast(i32, selected_tower.?.tile_x)) + std.math.absCast(tile_y - @intCast(i32, selected_tower.?.tile_y)) <= range) {
+                    tile_rgb = 128;
+                }
+            } else if (tower_index_being_placed >= 0) {
+                const range = towers_data[@intCast(u32, tower_index_being_placed)].range;
+                if (std.math.absCast(tile_x - @intCast(i32, selected_tile_x)) + std.math.absCast(tile_y - @intCast(i32, selected_tile_y)) <= range) {
+                    tile_rgb = 128;
+                }
+            }
+            rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.Color{ .r = tile_rgb, .g = tile_rgb, .b = tile_rgb, .a = 255 });
+        }
+    }
+}
+
+fn drawBackground(screen_dim: rl.Vector2, debug_bg_scroll: bool, bg_poses: *[4]rl.Vector2, bg_tex: *rl.Texture, hor_osc_shader: *rl.Shader) void {
+    const bg_source_rec = rl.Rectangle{
+        .x = 0,
+        .y = 0,
+        .width = @intToFloat(f32, bg_tex.width),
+        .height = -@intToFloat(f32, bg_tex.height),
+    };
+
+    rl.BeginShaderMode(hor_osc_shader.*);
+    for (bg_poses) |bg_pos| {
+        const bg_dest_rec = rl.Rectangle{
+            .x = bg_pos.x,
+            .y = bg_pos.y,
+            .width = screen_dim.x,
+            .height = screen_dim.y,
+        };
+        rl.DrawTexturePro(bg_tex.*, bg_source_rec, bg_dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+    }
+    rl.EndShaderMode();
+
+    if (debug_bg_scroll) {
+        for (bg_poses) |bg_pos| {
+            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x + 30, .y = bg_pos.y }, 3, rl.RED);
+            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x - 30, .y = bg_pos.y }, 3, rl.RED);
+            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y + 30 }, 3, rl.RED);
+            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y - 30 }, 3, rl.RED);
+        }
+    }
+}
+
+fn drawSprites(fba: *FixedBufferAllocator, tileset: *Tileset, debug_hit_boxes: bool,
+    debug_projectile: bool, towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy),
+    projectiles: *ArrayList(Projectile), selected_tile_x: i32, selected_tile_y: i32,
+    tower_index_being_placed: i32, tba_anim_frame: u8) !void {
+
+    fba.reset();
+    var draw_list = std.ArrayList(DrawBufferEntry).init(fba.allocator());
+
+    var entry_index: u32 = 0;
+    while (entry_index < towers.items.len + alive_enemies.items.len) : (entry_index += 1) {
+        var added_entries: u8 = 0;
+        var new_entries: [3]DrawBufferEntry = undefined;
+
+        if (towers.items.len > entry_index) {
+            const tower = towers.items[entry_index];
+            new_entries[added_entries] = DrawBufferEntry{
+                .tile_pos = rl.Vector2{
+                    .x = @intToFloat(f32, tower.tile_x),
+                    .y = @intToFloat(f32, tower.tile_y),
+                },
+                .ts_id = towers_data[@enumToInt(tower.kind)].tile_id + @enumToInt(tower.direction) * 4 + tower.anim_frame,
+            };
+            added_entries += 1;
+        }
+
+        if (alive_enemies.items.len > entry_index) {
+            const enemy = alive_enemies.items[entry_index];
+
+            new_entries[added_entries] = DrawBufferEntry{
+                .tile_pos = rl.Vector2{
+                    .x = enemy.pos.x,
+                    .y = enemy.pos.y,
+                },
+                .ts_id = enemies_data[@enumToInt(enemy.kind)].tile_id + @enumToInt(enemy.direction) * 4 + enemy.anim_frame,
+            };
+            added_entries += 1;
+        }
+
+        for (new_entries[0..added_entries]) |new_entry| {
+            var did_insert_entry = false;
+            for (draw_list.items) |draw_list_entry, curr_entry_index| {
+                if (new_entry.tile_pos.y < draw_list_entry.tile_pos.y) {
+                    try draw_list.insert(curr_entry_index, new_entry);
+                    did_insert_entry = true;
+                    break;
+                }
+            }
+            if (!did_insert_entry) {
+                try draw_list.append(new_entry);
+            }
+        }
+    }
+
+    for (draw_list.items) |entry| {
+        const target_tile_row = @divTrunc(entry.ts_id, tileset.columns);
+        const target_tile_column = @mod(entry.ts_id, tileset.columns);
+        const source_rect = rl.Rectangle{
+            .x = @intToFloat(f32, target_tile_column * sprite_width),
+            .y = @intToFloat(f32, target_tile_row * sprite_height),
+            .width = sprite_width,
+            .height = sprite_height,
+        };
+
+        var dest_pos = isoProject(entry.tile_pos.x, entry.tile_pos.y, 1);
+
+        if ((@floatToInt(i32, entry.tile_pos.x) == selected_tile_x) and
+            (@floatToInt(i32, entry.tile_pos.y) == selected_tile_y))
+        {
+            dest_pos.y -= 4 * scale_factor;
+        }
+
+        const dest_rect = rl.Rectangle{
+            .x = dest_pos.x,
+            .y = dest_pos.y,
+            .width = sprite_width * scale_factor,
+            .height = sprite_height * scale_factor,
+        };
+
+        rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+    }
+
+    if (debug_hit_boxes) {
+        for (alive_enemies.items) |enemy| {
+            for (enemy.colliders) |collider| {
+                var dest_pos = isoProject(collider.x, collider.y, 1);
+                const dest_rec = rl.Rectangle{
+                    .x = dest_pos.x,
+                    .y = dest_pos.y,
+                    .width = collider.width * scale_factor,
+                    .height = collider.height * scale_factor,
+                };
+                rl.DrawRectangleLinesEx(dest_rec, 1, rl.Color{ .r = 0, .g = 0, .b = 255, .a = 255 });
+            }
+        }
+    }
+
+    for (projectiles.items) |projectile| {
+        var dest_pos = isoProject(projectile.pos.x, projectile.pos.y, 1);
+        const dest_rect = rl.Rectangle{
+            .x = dest_pos.x,
+            .y = dest_pos.y,
+            .width = 2 * scale_factor, // TODO(caleb): projectile size not just scaled 2x2
+            .height = 2 * scale_factor,
+        };
+        rl.DrawRectanglePro(dest_rect, .{ .x = 0, .y = 0 }, 0, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
+
+        if (debug_projectile) {
+            const start_pos = rl.Vector2{
+                .x = projectile.start.x,
+                .y = projectile.start.y,
+            };
+            var projected_start = isoProject(start_pos.x, start_pos.y, 1);
+            var projected_end = isoProject(projectile.target.x, projectile.target.y, 1);
+            rl.DrawLineV(projected_start, projected_end, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
+        }
+    }
+
+    if (tower_index_being_placed >= 0) {
+        const ts_id = towers_data[@intCast(u32, tower_index_being_placed)].tile_id + @enumToInt(Direction.down) * 4 + tba_anim_frame;
+        const target_tile_row = @divTrunc(ts_id, tileset.columns);
+        const target_tile_column = @mod(ts_id, tileset.columns);
+        const source_rect = rl.Rectangle{
+            .x = @intToFloat(f32, target_tile_column * sprite_width),
+            .y = @intToFloat(f32, target_tile_row * sprite_height),
+            .width = sprite_width,
+            .height = sprite_height,
+        };
+
+        const projected_pos = isoProject(@intToFloat(f32, selected_tile_x), @intToFloat(f32, selected_tile_y), 1);
+        const dest_rect = rl.Rectangle{
+            .x = projected_pos.x,
+            .y = projected_pos.y,
+            .width = sprite_width * scale_factor,
+            .height = sprite_height * scale_factor,
+        };
+        rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+    }
+}
+
+fn drawDebugTextInfo(font: *rl.Font, towers: *ArrayList(Tower), projectiles: *ArrayList(Projectile), selected_tile_pos: rl.Vector2, screen_dim: rl.Vector2, debug_text_info: bool) !void {
+    if (debug_text_info) {
+        var strz_buffer: [256]u8 = undefined;
+        var y_offset: f32 = 0;
+
+        const fps_strz = try std.fmt.bufPrintZ(&strz_buffer, "FPS: {d}", .{rl.GetFPS()});
+        y_offset += rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, fps_strz), default_font_size, font_spacing).y;
+        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, fps_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, default_font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
+
+        const tower_count_strz = try std.fmt.bufPrintZ(&strz_buffer, "Tower count: {d}", .{towers.items.len});
+        y_offset += rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, tower_count_strz), default_font_size, font_spacing).y;
+        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, tower_count_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, default_font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
+
+        const mouse_tile_space_strz = try std.fmt.bufPrintZ(&strz_buffer, "Tile-space pos: ({d:.2}, {d:.2})", .{ selected_tile_pos.x, selected_tile_pos.y });
+        y_offset += rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, mouse_tile_space_strz), default_font_size, font_spacing).y;
+        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, mouse_tile_space_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, default_font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
+
+        const projectile_count_strz = try std.fmt.bufPrintZ(&strz_buffer, "Projectile count: {d}", .{projectiles.items.len});
+        y_offset += rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, projectile_count_strz), default_font_size, font_spacing).y;
+        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, projectile_count_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, default_font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
+    }
+}
+
+inline fn drawDebugOrigin(screen_mid: rl.Vector2, debug_origin: bool) void {
+    if (debug_origin) {
+        rl.DrawLineEx(screen_mid, rlm.Vector2Add(screen_mid, board_translation), 2, rl.Color{ .r = 0, .g = 255, .b = 0, .a = 255 });
+    }
+}
+
+inline fn drawStatusBar(font: *rl.Font) !void {
+
+    var strz_buffer: [256]u8 = undefined;
+    var info_box_width: f32 = 0;
+    const xy_pad_in_pixels = 10;
+
+    var money_strz = try std.fmt.bufPrintZ(&strz_buffer, "MONEY:${d}", .{monies});
+    const byte_offset = std.zig.c_builtins.__builtin_strlen(@ptrCast([*c]const u8, money_strz)) + 1;
+    const money_strz_dim = rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, money_strz), default_font_size, font_spacing);
+    info_box_width += money_strz_dim.x;
+
+    const hp_strz = try std.fmt.bufPrintZ(strz_buffer[byte_offset..], "HP:{d}", .{hp});
+    const hp_strz_dim = rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, hp_strz), default_font_size, font_spacing);
+    info_box_width += hp_strz_dim.x;
+
+    const info_rec = rl.Rectangle{
+        .x = 0,
+        .y = 0,
+        .width = info_box_width + xy_pad_in_pixels * 3,
+        .height = hp_strz_dim.y + xy_pad_in_pixels * 2,
+    };
+    rl.DrawRectangleRec(info_rec, color_off_white);
+    rl.DrawRectangleLinesEx(info_rec, 2, color_off_black);
+    rl.DrawTextEx(font.*, @ptrCast([*c]const u8, money_strz), rl.Vector2{ .x = xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
+    rl.DrawTextEx(font.*, @ptrCast([*c]const u8, hp_strz), rl.Vector2{ .x = money_strz_dim.x + xy_pad_in_pixels + xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
+}
+
 pub fn main() !void {
     const board_width = sprite_width * board_width_in_tiles * @floatToInt(c_int, scale_factor);
     rl.SetConfigFlags(rl.ConfigFlags.FLAG_MSAA_4X_HINT);
@@ -438,7 +716,7 @@ pub fn main() !void {
 
     rl.InitAudioDevice();
     defer rl.CloseAudioDevice();
-    rl.SetMasterVolume(1);
+    rl.SetMasterVolume(0);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -472,7 +750,7 @@ pub fn main() !void {
     rl.SetSoundVolume(dead_sound, 0.5);
     defer rl.UnloadSound(dead_sound);
 
-    const font = rl.LoadFont("assets/PICO-8_mono.ttf");
+    var font = rl.LoadFont("assets/PICO-8_mono.ttf");
     defer rl.UnloadFont(font);
 
     var bg_tex = rl.LoadTexture("assets/bg.png");
@@ -520,6 +798,12 @@ pub fn main() !void {
                 std.debug.assert(tower_id_count < towers_data.len);
                 towers_data[tower_id_count].tile_id = @intCast(u32, tile_id.Integer);
                 tower_id_count += 1;
+            } else if (std.mem.eql(u8, tile_type.String, "retry_button")) {
+                tileset.retry_button_id = @intCast(u32, tile_id.Integer);
+            }  else if (std.mem.eql(u8, tile_type.String, "quit_button")) {
+                tileset.quit_button_id = @intCast(u32, tile_id.Integer);
+            } else if (std.mem.eql(u8, tile_type.String, "menu_button")) {
+                tileset.menu_button_id = @intCast(u32, tile_id.Integer);
             } else {
                 unreachable;
             }
@@ -557,7 +841,7 @@ pub fn main() !void {
     var debug_hit_boxes = false;
     var debug_text_info = false;
 
-    var game_state = GameState.running;
+    var game_state = GameState.title_screen;
 
     var bg_poses = startBGPoses();
 
@@ -565,8 +849,7 @@ pub fn main() !void {
     var prev_frame_input = Input{ .l_mouse_button_is_down = false };
 
     var selected_tower: ?*Tower = null;
-    var is_placing_tower = false;
-    var tower_index_being_placed: u32 = undefined;
+    var tower_index_being_placed: i32 = -1;
 
     var tba_anim_frame: u8 = 0;
     var tba_anim_timer: u8 = 0;
@@ -602,7 +885,7 @@ pub fn main() !void {
 
     // TODO(caleb): spawn timer... also waves.
     var enemies_spawned: u32 = 0;
-    while (enemies_spawned < 500) : (enemies_spawned += 1) {
+    while (enemies_spawned < 501) : (enemies_spawned += 1) {
         var new_enemy: Enemy = undefined;
         new_enemy.kind = EnemyKind.gremlin_wiz_guy;
         new_enemy.direction = Direction.left;
@@ -620,22 +903,137 @@ pub fn main() !void {
 
     // TODO(caleb): Disable escape key to close... ( why is this on by default? )
     while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
+        rl.UpdateMusicStream(jam);
 
         const screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
         const screen_mid = rl.Vector2{
             .x = screen_dim.x / 2,
             .y = screen_dim.y / 2,
         };
+        const mouse_pos = rl.GetMousePosition();
 
-        rl.UpdateMusicStream(jam);
+        if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
+            bg_poses = startBGPoses();
+
+            // Inform shader of width and height changes.
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"), &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"), &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+        }
+
+        // Horizontal oscillation of bg for this frame.
+        const time_in_seconds = @floatCast(f32, rl.GetTime());
+        rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "time_in_seconds"), &time_in_seconds, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+
+        const bg_pos_move = rl.Vector2{ .x = @round(@cos(time_in_seconds / 100)), .y = @round(@sin(time_in_seconds / 100) * 5) };
+        for (bg_poses) |*bg_pos| {
+            bg_pos.* = rlm.Vector2Add(bg_pos.*, bg_pos_move);
+            if (bg_pos.x > screen_dim.x) {
+                bg_pos.x = -screen_dim.x + (bg_pos.x - screen_dim.x);
+            } else if (bg_pos.x < -screen_dim.x) {
+                bg_pos.x = screen_dim.x - (-screen_dim.x - bg_pos.x);
+            }
+            if (bg_pos.y > screen_dim.y) {
+                bg_pos.y = -screen_dim.y + (bg_pos.y - screen_dim.y);
+            } else if (bg_pos.y < -screen_dim.y) {
+                bg_pos.y = screen_dim.y - (-screen_dim.y - bg_pos.y);
+            }
+        }
+
+        // F1 to enable debugging
+        if (rl.IsKeyPressed(rl.KeyboardKey.KEY_F1)) {
+            debug_projectile = !debug_projectile;
+            debug_origin = !debug_origin;
+            debug_bg_scroll = !debug_bg_scroll;
+            debug_hit_boxes = !debug_hit_boxes;
+            debug_text_info = !debug_text_info;
+        }
+
+        // Scale board depending on mouse wheel change
+        scale_factor = clampf32(scale_factor + rl.GetMouseWheelMove(), 1, 10);
+
+        var selected_tile_pos = isoProjectInverted(mouse_pos.x - sprite_width * scale_factor / 2, mouse_pos.y, 0);
+        const selected_tile_x = @floatToInt(i32, @floor(selected_tile_pos.x));
+        const selected_tile_y = @floatToInt(i32, @floor(selected_tile_pos.y));
+
+        if (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_MIDDLE)) {
+            // Update board_translation by last frame's mouse delta
+            board_translation = rlm.Vector2Add(board_translation, rl.GetMouseDelta());
+        }
+
+        // Game over?
+        if (hp <= 0) game_state = GameState.game_over;
 
         switch (game_state) {
+            .title_screen => {
+                // TODO(caleb): Actually make a title screen/stage selector
+                game_state = GameState.running;
+            },
             .game_over => {
                 rl.BeginDrawing();
+
+                drawBackground(screen_dim, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
+                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
+                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies,
+                    &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
+                try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
+                drawDebugOrigin(screen_mid, debug_origin);
+                try drawStatusBar(&font);
+
+                const start_y = screen_mid.y + @sin(time_in_seconds * 10) * 5;
+
+                var strz_buffer: [256]u8 = undefined;
+                const game_over_font_size = 18;
+                const game_over_strz = try std.fmt.bufPrintZ(&strz_buffer, "GAME OVER!", .{});
+                const game_over_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_font_size, font_spacing);
+                const game_over_strz_pos = rl.Vector2{.x = screen_mid.x - game_over_strz_dim.x / 2, .y = start_y};
+
+                const game_over_popup_rec = rl.Rectangle{
+                    .x = screen_mid.x - game_over_strz_dim.x / 2 - (sprite_width * initial_scale_factor * 3 - game_over_strz_dim.x) / 2,
+                    .y = game_over_strz_pos.y,
+                    .width = sprite_width * initial_scale_factor * 3,
+                    .height = game_over_strz_dim.y + sprite_height * initial_scale_factor,
+                };
+
+                rl.DrawRectangleRec(game_over_popup_rec, color_off_white);
+                rl.DrawRectangleLinesEx(game_over_popup_rec, 2, color_off_black);
+                rl.DrawTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_strz_pos, game_over_font_size, font_spacing, color_off_black);
+
+                // Retry button
+                var target_tile_row = @divTrunc(tileset.retry_button_id, tileset.columns);
+                var target_tile_column = @mod(tileset.retry_button_id, tileset.columns);
+                var source_rec = rl.Rectangle{
+                    .x = @intToFloat(f32, target_tile_column * sprite_width),
+                    .y = @intToFloat(f32, target_tile_row * sprite_height),
+                    .width = sprite_width,
+                    .height = sprite_height,
+                };
+                var dest_rec = rl.Rectangle{
+                    .x = game_over_popup_rec.x,
+                    .y = game_over_strz_pos.y + game_over_strz_dim.y,
+                    .width =  sprite_width * initial_scale_factor,
+                    .height = sprite_height * initial_scale_factor,
+                };
+                rl.DrawTexturePro(tileset.tex, source_rec, dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+
+                // Title screen button
+                target_tile_row = @divTrunc(tileset.menu_button_id, tileset.columns);
+                target_tile_column = @mod(tileset.menu_button_id, tileset.columns);
+                source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
+                source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
+                dest_rec.x += dest_rec.width;
+                rl.DrawTexturePro(tileset.tex, source_rec, dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+
+                // Quit button
+                target_tile_row = @divTrunc(tileset.quit_button_id, tileset.columns);
+                target_tile_column = @mod(tileset.quit_button_id, tileset.columns);
+                source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
+                source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
+                dest_rec.x += dest_rec.width;
+                rl.DrawTexturePro(tileset.tex, source_rec, dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+
                 rl.EndDrawing();
             },
             .running => {
-
                 // Tower buy area frame counter
                 // NOTE(caleb): Wrap anim logic in a function if I get any more things that
                 //  need animations.
@@ -645,29 +1043,6 @@ pub fn main() !void {
                     tba_anim_frame += 1;
                     if (tba_anim_frame > 3) tba_anim_frame = 0; // NOTE(caleb): 3 is frames per animation - 1
                     // where all sprites have 4 anims per facing direction.
-                }
-
-                // F1 to enable debugging
-                if (rl.IsKeyPressed(rl.KeyboardKey.KEY_F1)) {
-                    debug_projectile = !debug_projectile;
-                    debug_origin = !debug_origin;
-                    debug_bg_scroll = !debug_bg_scroll;
-                    debug_hit_boxes = !debug_hit_boxes;
-                    debug_text_info = !debug_text_info;
-                }
-
-                // Scale board depending on mouse wheel change
-                scale_factor = clampf32(scale_factor + rl.GetMouseWheelMove(), 1, 10);
-
-                // Get mouse position
-                const mouse_pos = rl.GetMousePosition();
-                var selected_tile_pos = isoProjectInverted(mouse_pos.x - sprite_width * scale_factor / 2, mouse_pos.y, 0);
-                const selected_tile_x = @floatToInt(i32, @floor(selected_tile_pos.x));
-                const selected_tile_y = @floatToInt(i32, @floor(selected_tile_pos.y));
-
-                if (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_MIDDLE)) {
-                    // Update board_translation by last frame's mouse delta
-                    board_translation = rlm.Vector2Add(board_translation, rl.GetMouseDelta());
                 }
 
                 // Purchasing a tower?
@@ -683,11 +1058,10 @@ pub fn main() !void {
                     .height = tower_buy_item_dim.y * @intToFloat(f32, tower_buy_area_rows),
                 };
 
-                if ((!is_placing_tower) and
+                if ((tower_index_being_placed < 0) and
                     (rl.CheckCollisionPointRec(mouse_pos, buy_area_rec)) and
                     (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)) and
-                    (!prev_frame_input.l_mouse_button_is_down))
-                {
+                    (!prev_frame_input.l_mouse_button_is_down)) {
                     var selected_row: u32 = 0;
                     var selected_col: u32 = 0;
                     outer: while (selected_row < tower_buy_area_rows) : (selected_row += 1) {
@@ -702,9 +1076,8 @@ pub fn main() !void {
                             };
 
                             if (rl.CheckCollisionPointRec(mouse_pos, tower_buy_item_rec)) {
-                                is_placing_tower = true;
                                 selected_tower = null;
-                                tower_index_being_placed = selected_row * tower_buy_area_towers_per_row + selected_col;
+                                tower_index_being_placed = @intCast(i32, selected_row * tower_buy_area_towers_per_row + selected_col);
                                 break :outer;
                             }
                         }
@@ -714,8 +1087,7 @@ pub fn main() !void {
                 var clicked_on_a_tower = false;
                 if (rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
                     if ((selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
-                        (selected_tile_x >= 0) and (selected_tile_y >= 0))
-                    {
+                        (selected_tile_x >= 0) and (selected_tile_y >= 0)) {
                         for (towers.items) |*tower| {
                             if ((tower.tile_x == @intCast(u32, selected_tile_x)) and
                                 (tower.tile_y == @intCast(u32, selected_tile_y)))
@@ -731,24 +1103,21 @@ pub fn main() !void {
                     }
                 }
 
-                if (is_placing_tower and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
-                    is_placing_tower = false;
-
+                if (tower_index_being_placed >= 0 and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
                     if ((selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
                         (selected_tile_x >= 0) and (selected_tile_y >= 0))
                     {
                         const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * board_width_in_tiles + selected_tile_x)];
                         if (!tileset.isTrackTile(tile_index) and !clicked_on_a_tower and monies >=
-                            @intCast(i32, towers_data[tower_index_being_placed].cost))
-                        {
+                            @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost)) {
                             selected_tower = null;
                             const new_tower = Tower{
                                 .kind = @intToEnum(TowerKind, tower_index_being_placed),
                                 .direction = Direction.down,
                                 .tile_x = @intCast(u32, selected_tile_x),
                                 .tile_y = @intCast(u32, selected_tile_y),
-                                .fire_rate = towers_data[tower_index_being_placed].fire_rate,
-                                .fire_speed = towers_data[tower_index_being_placed].fire_speed,
+                                .fire_rate = towers_data[@intCast(u32, tower_index_being_placed)].fire_rate,
+                                .fire_speed = towers_data[@intCast(u32, tower_index_being_placed)].fire_speed,
                                 .fire_rate_timer = 0,
                                 .anim_frame = 0,
                                 .anim_timer = 0,
@@ -764,9 +1133,10 @@ pub fn main() !void {
                             if (!did_insert_tower) {
                                 try towers.append(new_tower);
                             }
-                            monies -= @intCast(i32, towers_data[tower_index_being_placed].cost);
+                            monies -= @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost);
                         }
                     }
+                    tower_index_being_placed = -1;
                 }
 
                 // Update each tower
@@ -918,40 +1288,9 @@ pub fn main() !void {
                             enemy_index -= 1;
                         } else if (!boundsCheck(@floatToInt(i32, @floor(enemy.pos.x)), @floatToInt(i32, @floor(enemy.pos.y)))) { // End of track
                             _ = alive_enemies.orderedRemove(@intCast(u32, enemy_index));
-                            hp -= enemy.hp;
+                            hp = @max(0, hp - enemy.hp);
                             enemy_index -= 1;
                         }
-                    }
-                }
-
-                // Check if game has ended because player has no more health points.
-                if (hp <= 0)
-                    game_state = GameState.game_over;
-
-                if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
-                    bg_poses = startBGPoses();
-
-                    // Inform shader of width and height changes.
-                    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"), &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-                    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"), &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-                }
-
-                // Horizontal oscillation of bg for this frame.
-                const time_in_seconds = @floatCast(f32, rl.GetTime());
-                rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "time_in_seconds"), &time_in_seconds, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-
-                const bg_pos_move = rl.Vector2{ .x = @round(@cos(time_in_seconds / 100)), .y = @round(@sin(time_in_seconds / 100) * 5) };
-                for (bg_poses) |*bg_pos| {
-                    bg_pos.* = rlm.Vector2Add(bg_pos.*, bg_pos_move);
-                    if (bg_pos.x > screen_dim.x) {
-                        bg_pos.x = -screen_dim.x + (bg_pos.x - screen_dim.x);
-                    } else if (bg_pos.x < -screen_dim.x) {
-                        bg_pos.x = screen_dim.x - (-screen_dim.x - bg_pos.x);
-                    }
-                    if (bg_pos.y > screen_dim.y) {
-                        bg_pos.y = -screen_dim.y + (bg_pos.y - screen_dim.y);
-                    } else if (bg_pos.y < -screen_dim.y) {
-                        bg_pos.y = screen_dim.y - (-screen_dim.y - bg_pos.y);
                     }
                 }
 
@@ -961,211 +1300,10 @@ pub fn main() !void {
 
                 rl.BeginDrawing();
 
-                // Background image
-                {
-                    const bg_source_rec = rl.Rectangle{
-                        .x = 0,
-                        .y = 0,
-                        .width = @intToFloat(f32, bg_tex.width),
-                        .height = -@intToFloat(f32, bg_tex.height),
-                    };
-
-                    rl.BeginShaderMode(hor_osc_shader);
-                    for (bg_poses) |bg_pos| {
-                        const bg_aest_rec = rl.Rectangle{
-                            .x = bg_pos.x,
-                            .y = bg_pos.y,
-                            .width = screen_dim.x,
-                            .height = screen_dim.y,
-                        };
-                        rl.DrawTexturePro(bg_tex, bg_source_rec, bg_aest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-                    }
-                    rl.EndShaderMode();
-
-                    if (debug_bg_scroll) {
-                        for (bg_poses) |bg_pos| {
-                            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x + 30, .y = bg_pos.y }, 3, rl.RED);
-                            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x - 30, .y = bg_pos.y }, 3, rl.RED);
-                            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y + 30 }, 3, rl.RED);
-                            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y - 30 }, 3, rl.RED);
-                        }
-                    }
-                }
-
-                var tile_y: i32 = 0;
-                while (tile_y < board_height_in_tiles) : (tile_y += 1) {
-                    var tile_x: i32 = 0;
-                    while (tile_x < board_width_in_tiles) : (tile_x += 1) {
-                        const ts_id = board_map.tileIDFromCoord(@intCast(u32, tile_x), @intCast(u32, tile_y)) orelse continue;
-                        var dest_pos = isoProject(@intToFloat(f32, tile_x), @intToFloat(f32, tile_y), 0);
-                        if (tile_x == selected_tile_x and tile_y == selected_tile_y) {
-                            dest_pos.y -= 4 * scale_factor;
-                        }
-
-                        const dest_rect = rl.Rectangle{
-                            .x = dest_pos.x,
-                            .y = dest_pos.y,
-                            .width = sprite_width * scale_factor,
-                            .height = sprite_height * scale_factor,
-                        };
-
-                        const target_tile_row = @divTrunc(ts_id, tileset.columns);
-                        const target_tile_column = @mod(ts_id, tileset.columns);
-                        const source_rect = rl.Rectangle{
-                            .x = @intToFloat(f32, target_tile_column * sprite_width),
-                            .y = @intToFloat(f32, target_tile_row * sprite_height),
-                            .width = sprite_width,
-                            .height = sprite_height,
-                        };
-
-                        var tile_rgb: u8 = 255;
-                        if (selected_tower != null) {
-                            const range = towers_data[@enumToInt(selected_tower.?.kind)].range;
-                            if (std.math.absCast(tile_x - @intCast(i32, selected_tower.?.tile_x)) + std.math.absCast(tile_y - @intCast(i32, selected_tower.?.tile_y)) <= range) {
-                                tile_rgb = 128;
-                            }
-                        } else if (is_placing_tower) {
-                            const range = towers_data[tower_index_being_placed].range;
-                            if (std.math.absCast(tile_x - @intCast(i32, selected_tile_x)) + std.math.absCast(tile_y - @intCast(i32, selected_tile_y)) <= range) {
-                                tile_rgb = 128;
-                            }
-                        }
-                        rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.Color{ .r = tile_rgb, .g = tile_rgb, .b = tile_rgb, .a = 255 });
-                    }
-                }
-
-                fba.reset();
-                var draw_list = std.ArrayList(DrawBufferEntry).init(fba.allocator());
-
-                var entry_index: u32 = 0;
-                while (entry_index < towers.items.len + alive_enemies.items.len) : (entry_index += 1) {
-                    var added_entries: u8 = 0;
-                    var new_entries: [3]DrawBufferEntry = undefined;
-
-                    if (towers.items.len > entry_index) {
-                        const tower = towers.items[entry_index];
-                        new_entries[added_entries] = DrawBufferEntry{
-                            .tile_pos = rl.Vector2{
-                                .x = @intToFloat(f32, tower.tile_x),
-                                .y = @intToFloat(f32, tower.tile_y),
-                            },
-                            .ts_id = towers_data[@enumToInt(tower.kind)].tile_id + @enumToInt(tower.direction) * 4 + tower.anim_frame,
-                        };
-                        added_entries += 1;
-                    }
-
-                    if (alive_enemies.items.len > entry_index) {
-                        const enemy = alive_enemies.items[entry_index];
-
-                        new_entries[added_entries] = DrawBufferEntry{
-                            .tile_pos = rl.Vector2{
-                                .x = enemy.pos.x,
-                                .y = enemy.pos.y,
-                            },
-                            .ts_id = enemies_data[@enumToInt(enemy.kind)].tile_id + @enumToInt(enemy.direction) * 4 + enemy.anim_frame,
-                        };
-                        added_entries += 1;
-                    }
-
-                    for (new_entries[0..added_entries]) |new_entry| {
-                        var did_insert_entry = false;
-                        for (draw_list.items) |draw_list_entry, curr_entry_index| {
-                            if (new_entry.tile_pos.y < draw_list_entry.tile_pos.y) {
-                                try draw_list.insert(curr_entry_index, new_entry);
-                                did_insert_entry = true;
-                                break;
-                            }
-                        }
-                        if (!did_insert_entry) {
-                            try draw_list.append(new_entry);
-                        }
-                    }
-                }
-
-                for (draw_list.items) |entry| {
-                    const target_tile_row = @divTrunc(entry.ts_id, tileset.columns);
-                    const target_tile_column = @mod(entry.ts_id, tileset.columns);
-                    const source_rect = rl.Rectangle{
-                        .x = @intToFloat(f32, target_tile_column * sprite_width),
-                        .y = @intToFloat(f32, target_tile_row * sprite_height),
-                        .width = sprite_width,
-                        .height = sprite_height,
-                    };
-
-                    var dest_pos = isoProject(entry.tile_pos.x, entry.tile_pos.y, 1);
-
-                    if ((@floatToInt(i32, entry.tile_pos.x) == selected_tile_x) and
-                        (@floatToInt(i32, entry.tile_pos.y) == selected_tile_y))
-                    {
-                        dest_pos.y -= 4 * scale_factor;
-                    }
-
-                    const dest_rect = rl.Rectangle{
-                        .x = dest_pos.x,
-                        .y = dest_pos.y,
-                        .width = sprite_width * scale_factor,
-                        .height = sprite_height * scale_factor,
-                    };
-
-                    rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-                }
-
-                if (debug_hit_boxes) {
-                    for (alive_enemies.items) |enemy| {
-                        for (enemy.colliders) |collider| {
-                            var dest_pos = isoProject(collider.x, collider.y, 1);
-                            const dest_rec = rl.Rectangle{
-                                .x = dest_pos.x,
-                                .y = dest_pos.y,
-                                .width = collider.width * scale_factor,
-                                .height = collider.height * scale_factor,
-                            };
-                            rl.DrawRectangleLinesEx(dest_rec, 1, rl.Color{ .r = 0, .g = 0, .b = 255, .a = 255 });
-                        }
-                    }
-                }
-
-                for (projectiles.items) |projectile| {
-                    var dest_pos = isoProject(projectile.pos.x, projectile.pos.y, 1);
-                    const dest_rect = rl.Rectangle{
-                        .x = dest_pos.x,
-                        .y = dest_pos.y,
-                        .width = 2 * scale_factor, // TODO(caleb): projectile size not just scaled 2x2
-                        .height = 2 * scale_factor,
-                    };
-                    rl.DrawRectanglePro(dest_rect, .{ .x = 0, .y = 0 }, 0, rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 });
-
-                    if (debug_projectile) {
-                        const start_pos = rl.Vector2{
-                            .x = projectile.start.x,
-                            .y = projectile.start.y,
-                        };
-                        var projected_start = isoProject(start_pos.x, start_pos.y, 1);
-                        var projected_end = isoProject(projectile.target.x, projectile.target.y, 1);
-                        rl.DrawLineV(projected_start, projected_end, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
-                    }
-                }
-
-                if (is_placing_tower) {
-                    const ts_id = towers_data[tower_index_being_placed].tile_id + @enumToInt(Direction.down) * 4 + tba_anim_frame;
-                    const target_tile_row = @divTrunc(ts_id, tileset.columns);
-                    const target_tile_column = @mod(ts_id, tileset.columns);
-                    const source_rect = rl.Rectangle{
-                        .x = @intToFloat(f32, target_tile_column * sprite_width),
-                        .y = @intToFloat(f32, target_tile_row * sprite_height),
-                        .width = sprite_width,
-                        .height = sprite_height,
-                    };
-
-                    const projected_pos = isoProject(@intToFloat(f32, selected_tile_x), @intToFloat(f32, selected_tile_y), 1);
-                    const dest_rect = rl.Rectangle{
-                        .x = projected_pos.x,
-                        .y = projected_pos.y,
-                        .width = sprite_width * scale_factor,
-                        .height = sprite_height * scale_factor,
-                    };
-                    rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-                }
+                drawBackground(screen_dim, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
+                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
+                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies,
+                    &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
 
                 // Draw tower buy area
                 {
@@ -1198,78 +1336,24 @@ pub fn main() !void {
 
                             const cost_bottom_pad_px = 2;
                             const cost_strz = try std.fmt.bufPrintZ(&strz_buffer, "${d}", .{tower_data.cost});
-                            const cost_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, cost_strz), tba_font_size, font_spacing);
+                            const cost_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, cost_strz), default_font_size, font_spacing);
                             const cost_strz_pos = rl.Vector2{
                                 .x = buy_area_rec.x + @intToFloat(f32, col_index) * tower_buy_item_dim.x + (tower_buy_item_dim.x - cost_strz_dim.x) / 2,
                                 .y = buy_area_rec.y + @intToFloat(f32, row_index) * tower_buy_item_dim.y + (tower_buy_item_dim.y - cost_strz_dim.y - cost_bottom_pad_px),
                             };
                             rl.DrawRectangleV(cost_strz_pos, cost_strz_dim, rl.Color{ .r = color_off_white.r, .g = color_off_white.g, .b = color_off_white.b, .a = 210 });
-                            rl.DrawTextEx(font, @ptrCast([*c]const u8, cost_strz), cost_strz_pos, tba_font_size, font_spacing, color_off_black);
+                            rl.DrawTextEx(font, @ptrCast([*c]const u8, cost_strz), cost_strz_pos, default_font_size, font_spacing, color_off_black);
                             rl.DrawRectangleLinesEx(tower_buy_item_rec, 2, color_off_black);
                         }
                     }
                 }
 
-                { // Display money and hp
-                    var strz_buffer: [256]u8 = undefined;
-                    var info_box_width: f32 = 0;
-                    const y_pad_in_pixels = 3;
-
-                    var money_strz = try std.fmt.bufPrintZ(&strz_buffer, "MONEY: ${d}", .{monies});
-                    const byte_offset = std.zig.c_builtins.__builtin_strlen(@ptrCast([*c]const u8, money_strz)) + 1;
-                    const money_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, money_strz), font_size, font_spacing);
-                    info_box_width = @max(info_box_width, money_strz_dim.x);
-
-                    const hp_strz = try std.fmt.bufPrintZ(strz_buffer[byte_offset..], "HP: {d}", .{hp});
-                    const hp_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, hp_strz), font_size, font_spacing);
-                    info_box_width = @max(info_box_width, hp_strz_dim.x);
-
-                    const info_rec = rl.Rectangle{
-                        .x = 0,
-                        .y = 0,
-                        .width = info_box_width,
-                        .height = money_strz_dim.y + hp_strz_dim.y + y_pad_in_pixels,
-                    };
-                    rl.DrawRectangleRec(info_rec, color_off_white);
-                    rl.DrawTextEx(font, @ptrCast([*c]const u8, money_strz), rl.Vector2{ .x = 0, .y = 0 }, font_size, font_spacing, color_off_black);
-                    rl.DrawTextEx(font, @ptrCast([*c]const u8, hp_strz), rl.Vector2{ .x = 0, .y = money_strz_dim.y + y_pad_in_pixels }, font_size, font_spacing, color_off_black);
-                }
-
-                if (debug_text_info) {
-                    var strz_buffer: [256]u8 = undefined;
-                    var y_offset: f32 = 0;
-
-                    const fps_strz = try std.fmt.bufPrintZ(&strz_buffer, "FPS: {d}", .{rl.GetFPS()});
-                    y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, fps_strz), font_size, font_spacing).y;
-                    rl.DrawTextEx(font, @ptrCast([*c]const u8, fps_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
-
-                    const tower_count_strz = try std.fmt.bufPrintZ(&strz_buffer, "Tower count: {d}", .{towers.items.len});
-                    y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, tower_count_strz), font_size, font_spacing).y;
-                    rl.DrawTextEx(font, @ptrCast([*c]const u8, tower_count_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
-
-                    const mouse_tile_space_strz = try std.fmt.bufPrintZ(&strz_buffer, "Tile-space pos: ({d:.2}, {d:.2})", .{ selected_tile_pos.x, selected_tile_pos.y });
-                    y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, mouse_tile_space_strz), font_size, font_spacing).y;
-                    rl.DrawTextEx(font, @ptrCast([*c]const u8, mouse_tile_space_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
-
-                    const projectile_count_strz = try std.fmt.bufPrintZ(&strz_buffer, "Projectile count: {d}", .{projectiles.items.len});
-                    y_offset += rl.MeasureTextEx(font, @ptrCast([*c]const u8, projectile_count_strz), font_size, font_spacing).y;
-                    rl.DrawTextEx(font, @ptrCast([*c]const u8, projectile_count_strz), rl.Vector2{ .x = 0, .y = screen_dim.y - y_offset }, font_size, font_spacing, rl.Color{ .r = 255, .g = 0, .b = 0, .a = 255 });
-                }
-
-                // Draw tower info
-                //if (selected_tower != null) {
-                //    var tower_info_buffer: [256]u8 = undefined;
-                //    const tower_tile_pos_strz = try std.fmt.bufPrintZ(&tower_info_buffer, "Tile pos: ({d}, {d})", .{selected_tower.?.tile_x, selected_tower.?.tile_y});
-                //    rl.DrawTextEx(font, @ptrCast([*c]const u8, tower_tile_pos_strz), rl.Vector2{ .x = 0, .y = 0 }, font_size, font_spacing, rl.Color{.r = 0, .g = 255, .b = 0, .a = 255});
-                //}
-
-                if (debug_origin) {
-                    rl.DrawLineEx(screen_mid, rlm.Vector2Add(screen_mid, board_translation), 2, rl.Color{ .r = 0, .g = 255, .b = 0, .a = 255 });
-                }
+                try drawStatusBar(&font);
+                try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
+                drawDebugOrigin(screen_mid, debug_origin);
 
                 rl.EndDrawing();
             },
-            else => unreachable,
         }
     }
 
