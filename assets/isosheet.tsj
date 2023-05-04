@@ -42,6 +42,10 @@
          "type":"tower"
         }, 
         {
+         "id":128,
+         "type":"death_anim"
+        }, 
+        {
          "id":144,
          "type":"retry_button"
         }, 
@@ -52,6 +56,22 @@
         {
          "id":146,
          "type":"menu_button"
+        }, 
+        {
+         "id":147,
+         "type":"play_button"
+        }, 
+        {
+         "id":148,
+         "type":"pause_button"
+        }, 
+        {
+         "id":149,
+         "type":"health_icon"
+        }, 
+        {
+         "id":150,
+         "type":"money_icon"
         }],
  "tilewidth":32,
  "type":"tileset",
