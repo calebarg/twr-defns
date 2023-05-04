@@ -118,7 +118,7 @@ var round_spawn_data: [60]RoundSpawns = undefined;
 var enemies_data = [_]EnemyData{
     EnemyData{ // Gremlin wiz guy
         .hp = 1,
-        .move_speed = 1.0,
+        .move_speed = 40.0,
         .tile_id = undefined,
         .sprite_offset_x = 10,
         .sprite_offset_y = 14,
@@ -287,6 +287,7 @@ const DrawBufferEntry = struct {
 
 const Input = struct {
     l_mouse_button_is_down: bool,
+    mouse_pos: rl.Vector2,
 };
 
 inline fn boundsCheck(x: i32, y: i32) bool {
@@ -493,6 +494,35 @@ fn drawBoard(board_map: *Map, tileset: *Tileset, selected_tile_x: i32, selected_
                 }
             }
             rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.Color{ .r = tile_rgb, .g = tile_rgb, .b = tile_rgb, .a = 255 });
+        }
+    }
+}
+
+fn drawTitleScreenBoard(board_map: *Map, tileset: *Tileset, time_in_seconds: f32) void {
+    var tile_y: i32 = 0;
+    while (tile_y < board_height_in_tiles) : (tile_y += 1) {
+        var tile_x: i32 = 0;
+        while (tile_x < board_width_in_tiles) : (tile_x += 1) {
+            const ts_id = board_map.tileIDFromCoord(@intCast(u32, tile_x), @intCast(u32, tile_y)) orelse continue;
+            var dest_pos = isoProject(@intToFloat(f32, tile_x), @intToFloat(f32, tile_y), @cos((time_in_seconds / 2) * (@intToFloat(f32, tile_x) + @intToFloat(f32, tile_y))) / 4);
+
+            const dest_rect = rl.Rectangle{
+                .x = dest_pos.x,
+                .y = dest_pos.y,
+                .width = sprite_width * scale_factor,
+                .height = sprite_height * scale_factor,
+            };
+
+            const target_tile_row = @divTrunc(ts_id, tileset.columns);
+            const target_tile_column = @mod(ts_id, tileset.columns);
+            const source_rect = rl.Rectangle{
+                .x = @intToFloat(f32, target_tile_column * sprite_width),
+                .y = @intToFloat(f32, target_tile_row * sprite_height),
+                .width = sprite_width,
+                .height = sprite_height,
+            };
+
+            rl.DrawTexturePro(tileset.tex, source_rect, dest_rect, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
         }
     }
 }
@@ -721,6 +751,7 @@ inline fn resetGameState(towers: *ArrayList(Tower), alive_enemies: *ArrayList(En
     towers.clearRetainingCapacity();
     alive_enemies.clearRetainingCapacity();
     dead_enemies.clearRetainingCapacity();
+    money = 100;
     hp = 100;
     score = 0;
     round = 0;
@@ -785,6 +816,9 @@ pub fn main() !void {
     rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_width"), &@intToFloat(f32, rl.GetScreenWidth()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
     rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_height"), &@intToFloat(f32, rl.GetScreenHeight()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
 
+    var splash_text_tex = rl.LoadTexture("assets/splash_text.png");
+    defer rl.UnloadTexture(splash_text_tex);
+
     // Load tileset
     var tileset: Tileset = undefined;
     tileset.tex = rl.LoadTexture("assets/isosheet.png");
@@ -826,7 +860,8 @@ pub fn main() !void {
             } else if (std.mem.eql(u8, tile_type.String, "menu_button")) {
                 tileset.menu_button_id = @intCast(u32, tile_id.Integer);
             } else {
-                unreachable;
+                std.debug.print("asdf\n", .{});
+               // unreachable;
             }
         }
     }
@@ -889,11 +924,16 @@ pub fn main() !void {
     var debug_text_info = false;
 
     var game_mode = GameMode.title_screen;
+    var splash_text_pos = rl.Vector2{
+        .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - @intToFloat(f32, splash_text_tex.width) * initial_scale_factor / 2.0,
+        .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
+    };
+    var hot_button_index: i32 = -1;
 
     var bg_poses = startBGPoses();
 
     var prev_frame_screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
-    var prev_frame_input = Input{ .l_mouse_button_is_down = false };
+    var prev_frame_input = Input{ .l_mouse_button_is_down = false, .mouse_pos = rl.Vector2{ .x = 0, .y = 0 } };
 
     var selected_tower: ?*Tower = null;
     var tower_index_being_placed: i32 = -1;
@@ -963,9 +1003,14 @@ pub fn main() !void {
         if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
             bg_poses = startBGPoses();
 
+            splash_text_pos = rl.Vector2{
+                .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - @intToFloat(f32, splash_text_tex.width) * initial_scale_factor / 2.0,
+                .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
+            };
+
             // Inform shader of width and height changes.
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderWidth"), &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "renderHeight"), &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_width"), &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_height"), &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
         }
 
         // Horizontal oscillation of bg for this frame.
@@ -1013,14 +1058,28 @@ pub fn main() !void {
 
         switch (game_mode) {
             .title_screen => {
-                // TODO(caleb): Actually make a title screen/stage selector
-                game_mode = GameMode.running;
+                var y_offset: f32 = 0;
+                if (splash_text_pos.y + @intToFloat(f32, splash_text_tex.height) * initial_scale_factor / 2 <= screen_mid.y - @intToFloat(f32, splash_text_tex.height)) {
+                    const fall_speed_scalar = 3;
+                    splash_text_pos.y += 100 * fall_speed_scalar / target_fps;
+                } else {
+                    y_offset = @sin(time_in_seconds * 10) * 10;
+                    //game_mode = GameMode.running;
+                }
+
+                prev_frame_screen_dim = screen_dim;
+
+                rl.BeginDrawing();
+                drawBackground(screen_dim, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
+                drawTitleScreenBoard(&board_map, &tileset, time_in_seconds);
+                rl.DrawTextureEx(splash_text_tex, rl.Vector2{ .x = splash_text_pos.x, .y = splash_text_pos.y + y_offset }, 0, initial_scale_factor, rl.WHITE);
+                rl.EndDrawing();
             },
             .game_over => {
                 var strz_buffer: [256]u8 = undefined;
                 const game_over_font_size = 18;
 
-                const game_over_strz = try std.fmt.bufPrintZ(&strz_buffer, "GAME OVER!", .{});
+                const game_over_strz = try std.fmt.bufPrintZ(&strz_buffer, "GAME OVER! -- SCORE: {d}", .{score});
                 const game_over_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_font_size, font_spacing);
 
                 const start_y = screen_mid.y + @sin(time_in_seconds * 10) * 5;
@@ -1041,28 +1100,41 @@ pub fn main() !void {
                     rec.height = sprite_height * initial_scale_factor;
 
                     if ((rl.CheckCollisionPointRec(mouse_pos, rec.*)) and
+                        (!prev_frame_input.l_mouse_button_is_down) and
                         (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)))
                     {
+                        hot_button_index = @intCast(i32, rec_index);
+                    } else if (@intCast(i32, rec_index) == hot_button_index and !rl.CheckCollisionPointRec(mouse_pos, rec.*)) {
+                        hot_button_index = -1;
+                    }
+
+                    if (@intCast(i32, rec_index) == hot_button_index) {
                         rec.x += sprite_width * initial_scale_factor * 0.1 / 2.0;
                         rec.y += sprite_height * initial_scale_factor * 0.1 / 2.0;
                         rec.width *= 0.9;
                         rec.height *= 0.9;
                     }
 
-                    if ((rl.CheckCollisionPointRec(mouse_pos, rec.*)) and
-                        (rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)))
-                    {
+                    if (@intCast(i32, rec_index) == hot_button_index and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
                         if (rec_index == 0) {
                             resetGameState(&towers, &alive_enemies, &dead_enemies);
                             game_mode = GameMode.running;
                         } else if (rec_index == 1) {
                             resetGameState(&towers, &alive_enemies, &dead_enemies);
                             game_mode = GameMode.title_screen;
+                            splash_text_pos = rl.Vector2{
+                                .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - @intToFloat(f32, splash_text_tex.width) * initial_scale_factor / 2.0,
+                                .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
+                            };
                         } else if (rec_index == 2) {
                             // TODO(caleb): Exit
                         }
                     }
                 }
+
+                prev_frame_input.mouse_pos = mouse_pos;
+                prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
+                prev_frame_screen_dim = screen_dim;
 
                 rl.BeginDrawing();
 
@@ -1073,8 +1145,8 @@ pub fn main() !void {
                 drawDebugOrigin(screen_mid, debug_origin);
                 try drawStatusBar(&font);
 
-                rl.DrawRectangleRec(game_over_popup_rec, color_off_white);
-                rl.DrawRectangleLinesEx(game_over_popup_rec, 2, color_off_black);
+                // rl.DrawRectangleRec(game_over_popup_rec, color_off_black);
+                // rl.DrawRectangleLinesEx(game_over_popup_rec, 2, color_off_white);
                 rl.DrawTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_strz_pos, game_over_font_size, font_spacing, color_off_black);
 
                 var target_tile_row = @divTrunc(tileset.retry_button_id, tileset.columns);
