@@ -4,6 +4,9 @@ const rlm = @import("raylib-math");
 
 const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 const ArrayList = std.ArrayList;
+const AutoHashMap = std.AutoHashMap;
+
+const hashString = std.hash_map.hashString;
 
 const initial_scale_factor = 4;
 var scale_factor: f32 = initial_scale_factor;
@@ -16,7 +19,7 @@ var score: u32 = 0;
 var round: u32 = 0;
 
 const target_fps = 60;
-const tower_buy_area_sprite_scale = 0.7;
+const tower_buy_area_sprite_scale = 0.8;
 const tower_buy_area_towers_per_row = 1;
 const default_font_size = 18;
 const font_spacing = 2;
@@ -29,6 +32,7 @@ const sprite_height = 32;
 // *Treat tiles as draw buffer entries. ( One way to do it would be moving tiles to an array list just like enemies, towers, bullets, etc...)
 // *Money animation ( just need a list of vecs + amt lost or gained ) also do this with health?
 // *HP and money icons
+// *How to play ( put in readme? )
 
 const anim_frames_speed = 7;
 
@@ -36,20 +40,14 @@ const color_off_black = rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 };
 const color_off_white = rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 };
 
 const Tileset = struct {
-    // TODO(caleb): hashmap for specifc id's
-    track_start_id: u32,
-    track_id: u32,
-    retry_button_id: u32,
-    quit_button_id: u32,
-    menu_button_id: u32,
-
-    columns: u32,
+    columns: u16,
     tex: rl.Texture,
+    tile_name_to_id: AutoHashMap(u64, u16),
 
-    pub inline fn isTrackTile(self: Tileset, target_tile_id: u32) bool {
+    pub inline fn isTrackTile(self: Tileset, target_tile_id: u16) bool {
         var result = false;
-        if ((self.track_start_id == target_tile_id) or
-            (self.track_id == target_tile_id))
+        if ((self.tile_name_to_id.get(hashString("track_start")).? == target_tile_id) or
+            (self.tile_name_to_id.get(hashString("track")).? == target_tile_id))
         {
             result = true;
         }
@@ -58,8 +56,8 @@ const Tileset = struct {
 };
 
 const Map = struct {
-    tile_indicies: std.ArrayList(u32),
-    first_gid: u32,
+    tile_indicies: ArrayList(u16),
+    first_gid: u16,
 
     pub fn tileIDFromCoord(self: *Map, tile_x: u32, tile_y: u32) ?u32 {
         std.debug.assert(tile_y * board_width_in_tiles + tile_x < self.*.tile_indicies.items.len);
@@ -118,7 +116,7 @@ var round_spawn_data: [60]RoundSpawns = undefined;
 var enemies_data = [_]EnemyData{
     EnemyData{ // Gremlin wiz guy
         .hp = 1,
-        .move_speed = 40.0,
+        .move_speed = 1.0,
         .tile_id = undefined,
         .sprite_offset_x = 10,
         .sprite_offset_y = 14,
@@ -359,7 +357,7 @@ fn updateEnemy(tileset: *Tileset, map: *Map, enemy: *Enemy) void {
     const current_direction = enemy.direction;
     enemy.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.*.direction) + 1, @enumToInt(Direction.right) + 1));
     while (enemy.direction != current_direction) : (enemy.direction = @intToEnum(Direction, @mod(@enumToInt(enemy.direction) + 1, @enumToInt(Direction.right) + 1))) {
-        var future_target_tile_id: ?u32 = null;
+        var future_target_tile_id: ?u16 = null;
         switch (enemy.direction) {
             .right => {
                 if (boundsCheck(@floatToInt(i32, enemy.pos.x) + 1, @floatToInt(i32, enemy.pos.y)) and enemy.last_step_direction != Direction.left) {
@@ -763,6 +761,7 @@ pub fn main() !void {
     rl.InitWindow(board_width, boardHeight(), "twr-defns");
     rl.SetWindowState(rl.ConfigFlags.FLAG_WINDOW_RESIZABLE);
     rl.SetWindowState(rl.ConfigFlags.FLAG_VSYNC_HINT);
+    rl.SetExitKey(rl.KeyboardKey.KEY_NULL);
     rl.SetTargetFPS(target_fps);
     rl.SetTraceLogLevel(@enumToInt(rl.TraceLogLevel.LOG_WARNING));
 
@@ -819,10 +818,11 @@ pub fn main() !void {
     var splash_text_tex = rl.LoadTexture("assets/splash_text.png");
     defer rl.UnloadTexture(splash_text_tex);
 
-    // Load tileset
     var tileset: Tileset = undefined;
     tileset.tex = rl.LoadTexture("assets/isosheet.png");
     defer rl.UnloadTexture(tileset.tex);
+    tileset.tile_name_to_id = AutoHashMap(u64, u16).init(ally);
+    defer tileset.tile_name_to_id.deinit();
     {
         const tileset_file = try std.fs.cwd().openFile("assets/isosheet.tsj", .{});
         defer tileset_file.close();
@@ -832,7 +832,7 @@ pub fn main() !void {
         var parsed_tileset_data = try parser.parse(raw_tileset_json);
 
         const columns_value = parsed_tileset_data.root.Object.get("columns") orelse unreachable;
-        tileset.columns = @intCast(u32, columns_value.Integer);
+        tileset.columns = @intCast(u16, columns_value.Integer);
 
         const tile_data = parsed_tileset_data.root.Object.get("tiles") orelse unreachable;
         var enemy_id_count: u32 = 0;
@@ -841,11 +841,7 @@ pub fn main() !void {
             var tile_id = tile.Object.get("id") orelse unreachable;
             var tile_type = tile.Object.get("type") orelse unreachable;
 
-            if (std.mem.eql(u8, tile_type.String, "track")) {
-                tileset.track_id = @intCast(u32, tile_id.Integer);
-            } else if (std.mem.eql(u8, tile_type.String, "track_start")) {
-                tileset.track_start_id = @intCast(u32, tile_id.Integer);
-            } else if (std.mem.eql(u8, tile_type.String, "enemy")) {
+            if (std.mem.eql(u8, tile_type.String, "enemy")) {
                 std.debug.assert(enemy_id_count < enemies_data.len);
                 enemies_data[enemy_id_count].tile_id = @intCast(u32, tile_id.Integer);
                 enemy_id_count += 1;
@@ -853,21 +849,14 @@ pub fn main() !void {
                 std.debug.assert(tower_id_count < towers_data.len);
                 towers_data[tower_id_count].tile_id = @intCast(u32, tile_id.Integer);
                 tower_id_count += 1;
-            } else if (std.mem.eql(u8, tile_type.String, "retry_button")) {
-                tileset.retry_button_id = @intCast(u32, tile_id.Integer);
-            } else if (std.mem.eql(u8, tile_type.String, "quit_button")) {
-                tileset.quit_button_id = @intCast(u32, tile_id.Integer);
-            } else if (std.mem.eql(u8, tile_type.String, "menu_button")) {
-                tileset.menu_button_id = @intCast(u32, tile_id.Integer);
             } else {
-                std.debug.print("asdf\n", .{});
-               // unreachable;
+                try tileset.tile_name_to_id.put(hashString(tile_type.String), @intCast(u16, tile_id.Integer));
             }
         }
     }
 
     var board_map: Map = undefined;
-    board_map.tile_indicies = std.ArrayList(u32).init(ally);
+    board_map.tile_indicies = ArrayList(u16).init(ally);
     defer board_map.tile_indicies.deinit();
     {
         const map_file = try std.fs.cwd().openFile("assets/map1.tmj", .{});
@@ -882,13 +871,13 @@ pub fn main() !void {
         const layer = layers.Array.items[0];
         const tile_data = layer.Object.get("data") orelse unreachable;
         for (tile_data.Array.items) |tile_index| {
-            try board_map.tile_indicies.append(@intCast(u32, tile_index.Integer));
+            try board_map.tile_indicies.append(@intCast(u16, tile_index.Integer));
         }
 
         var tilesets = parsed_map.root.Object.get("tilesets") orelse unreachable;
         std.debug.assert(tilesets.Array.items.len == 1);
         const first_gid = tilesets.Array.items[0].Object.get("firstgid") orelse unreachable;
-        board_map.first_gid = @intCast(u32, first_gid.Integer);
+        board_map.first_gid = @intCast(u16, first_gid.Integer);
     }
 
     // Read in round data
@@ -929,12 +918,11 @@ pub fn main() !void {
         .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
     };
     var hot_button_index: i32 = -1;
-
     var bg_poses = startBGPoses();
-
     var prev_frame_screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
     var prev_frame_input = Input{ .l_mouse_button_is_down = false, .mouse_pos = rl.Vector2{ .x = 0, .y = 0 } };
 
+    var round_in_progress = false;
     var selected_tower: ?*Tower = null;
     var tower_index_being_placed: i32 = -1;
 
@@ -944,12 +932,13 @@ pub fn main() !void {
     var enemy_start_tile_y: u32 = 0;
     var enemy_start_tile_x: u32 = 0;
     {
+        const track_start_id = tileset.tile_name_to_id.get(hashString("track_start")) orelse unreachable;
         var found_enemy_start_tile = false;
         outer: while (enemy_start_tile_y < board_height_in_tiles) : (enemy_start_tile_y += 1) {
             enemy_start_tile_x = 0;
             while (enemy_start_tile_x < board_width_in_tiles) : (enemy_start_tile_x += 1) {
                 const ts_id = board_map.tileIDFromCoord(enemy_start_tile_x, enemy_start_tile_y) orelse continue;
-                if ((ts_id) == tileset.track_start_id) {
+                if ((ts_id) == track_start_id) {
                     found_enemy_start_tile = true;
                     break :outer;
                 }
@@ -989,8 +978,7 @@ pub fn main() !void {
         try alive_enemies.append(new_enemy);
     }
 
-    // TODO(caleb): Disable escape key to close... ( why is this on by default? )
-    while (!rl.WindowShouldClose()) { // Detect window close button or ESC key
+    game_loop: while (!rl.WindowShouldClose()) {
         rl.UpdateMusicStream(jam);
 
         const screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
@@ -1058,21 +1046,91 @@ pub fn main() !void {
 
         switch (game_mode) {
             .title_screen => {
+                const fall_speed_scalar = 4;
+                const splash_rec = rl.Rectangle{
+                    .x = splash_text_pos.x,
+                    .y = splash_text_pos.y,
+                    .width = @intToFloat(f32, splash_text_tex.width) * initial_scale_factor,
+                    .height = @intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
+                };
+
+                var draw_buttons = false;
                 var y_offset: f32 = 0;
                 if (splash_text_pos.y + @intToFloat(f32, splash_text_tex.height) * initial_scale_factor / 2 <= screen_mid.y - @intToFloat(f32, splash_text_tex.height)) {
-                    const fall_speed_scalar = 3;
                     splash_text_pos.y += 100 * fall_speed_scalar / target_fps;
-                } else {
+                } else { // Don't Draw buttons until title screen text has reached the middle of the screen.
+                    draw_buttons = true;
                     y_offset = @sin(time_in_seconds * 10) * 10;
-                    //game_mode = GameMode.running;
                 }
 
+                var button_dest_recs: [2]rl.Rectangle = undefined;
+                for (button_dest_recs) |*rec, rec_index| {
+                    rec.x = splash_rec.x + sprite_width * initial_scale_factor * @intToFloat(f32, rec_index) +
+                        (splash_rec.width - sprite_width * initial_scale_factor * @intToFloat(f32, button_dest_recs.len)) / 2;
+                    rec.y = splash_rec.y + splash_rec.height;
+                    rec.width = sprite_width * initial_scale_factor;
+                    rec.height = sprite_height * initial_scale_factor;
+
+                    // Is this button hot?
+                    if ((rl.CheckCollisionPointRec(mouse_pos, rec.*)) and
+                        (!prev_frame_input.l_mouse_button_is_down) and
+                        (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)))
+                    {
+                        hot_button_index = @intCast(i32, rec_index);
+                    }
+                    // No..
+                    else if (@intCast(i32, rec_index) == hot_button_index and !rl.CheckCollisionPointRec(mouse_pos, rec.*)) {
+                        hot_button_index = -1;
+                    }
+
+                    // Button is hot so make it smaller while left mouse is down.
+                    if (@intCast(i32, rec_index) == hot_button_index) {
+                        rec.x += sprite_width * initial_scale_factor * 0.1 / 2.0;
+                        rec.y += sprite_height * initial_scale_factor * 0.1 / 2.0;
+                        rec.width *= 0.9;
+                        rec.height *= 0.9;
+                    }
+
+                    // Actually do the thing.
+                    if (@intCast(i32, rec_index) == hot_button_index and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
+                        if (rec_index == 0) { // Play button
+                            resetGameState(&towers, &alive_enemies, &dead_enemies);
+                            game_mode = GameMode.running;
+                        } else if (rec_index == 1) { // Quit button
+                            break :game_loop;
+                        }
+                    }
+                }
+
+                prev_frame_input.mouse_pos = mouse_pos;
+                prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
                 prev_frame_screen_dim = screen_dim;
 
                 rl.BeginDrawing();
                 drawBackground(screen_dim, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
                 drawTitleScreenBoard(&board_map, &tileset, time_in_seconds);
                 rl.DrawTextureEx(splash_text_tex, rl.Vector2{ .x = splash_text_pos.x, .y = splash_text_pos.y + y_offset }, 0, initial_scale_factor, rl.WHITE);
+
+                if (draw_buttons) {
+
+                    // Play button
+                    var target_tile_row = @divTrunc(tileset.tile_name_to_id.get(hashString("play_button")).?, tileset.columns);
+                    var target_tile_column = @mod(tileset.tile_name_to_id.get(hashString("play_button")).?, tileset.columns);
+                    var button_source_rec = rl.Rectangle{
+                        .x = @intToFloat(f32, target_tile_column * sprite_width),
+                        .y = @intToFloat(f32, target_tile_row * sprite_height),
+                        .width = sprite_width,
+                        .height = sprite_height,
+                    };
+                    rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[0], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+
+                    // Title screen button
+                    target_tile_row = @divTrunc(tileset.tile_name_to_id.get(hashString("quit_button")).?, tileset.columns);
+                    target_tile_column = @mod(tileset.tile_name_to_id.get(hashString("quit_button")).?, tileset.columns);
+                    button_source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
+                    button_source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
+                    rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[1], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+                }
                 rl.EndDrawing();
             },
             .game_over => {
@@ -1127,7 +1185,7 @@ pub fn main() !void {
                                 .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
                             };
                         } else if (rec_index == 2) {
-                            // TODO(caleb): Exit
+                            break :game_loop;
                         }
                     }
                 }
@@ -1149,28 +1207,27 @@ pub fn main() !void {
                 // rl.DrawRectangleLinesEx(game_over_popup_rec, 2, color_off_white);
                 rl.DrawTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_strz_pos, game_over_font_size, font_spacing, color_off_black);
 
-                var target_tile_row = @divTrunc(tileset.retry_button_id, tileset.columns);
-                var target_tile_column = @mod(tileset.retry_button_id, tileset.columns);
+                // Retry button
+                var target_tile_row = @divTrunc(tileset.tile_name_to_id.get(hashString("retry_button")).?, tileset.columns);
+                var target_tile_column = @mod(tileset.tile_name_to_id.get(hashString("retry_button")).?, tileset.columns);
                 var button_source_rec = rl.Rectangle{
                     .x = @intToFloat(f32, target_tile_column * sprite_width),
                     .y = @intToFloat(f32, target_tile_row * sprite_height),
                     .width = sprite_width,
                     .height = sprite_height,
                 };
-
-                // Retry button
                 rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[0], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
 
                 // Title screen button
-                target_tile_row = @divTrunc(tileset.menu_button_id, tileset.columns);
-                target_tile_column = @mod(tileset.menu_button_id, tileset.columns);
+                target_tile_row = @divTrunc(tileset.tile_name_to_id.get(hashString("menu_button")).?, tileset.columns);
+                target_tile_column = @mod(tileset.tile_name_to_id.get(hashString("menu_button")).?, tileset.columns);
                 button_source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
                 button_source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
                 rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[1], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
 
                 // Quit button
-                target_tile_row = @divTrunc(tileset.quit_button_id, tileset.columns);
-                target_tile_column = @mod(tileset.quit_button_id, tileset.columns);
+                target_tile_row = @divTrunc(tileset.tile_name_to_id.get(hashString("quit_button")).?, tileset.columns);
+                target_tile_column = @mod(tileset.tile_name_to_id.get(hashString("quit_button")).?, tileset.columns);
                 button_source_rec.x = @intToFloat(f32, target_tile_column * sprite_width);
                 button_source_rec.y = @intToFloat(f32, target_tile_row * sprite_height);
                 rl.DrawTexturePro(tileset.tex, button_source_rec, button_dest_recs[2], .{ .x = 0, .y = 0 }, 0, rl.WHITE);
@@ -1343,6 +1400,46 @@ pub fn main() !void {
                     }
                 }
 
+                // Pressed round start button?
+
+                var round_start_rec = rl.Rectangle{
+                    .x = screen_dim.x - sprite_width * initial_scale_factor,
+                    .y = screen_dim.y - sprite_height * initial_scale_factor,
+                    .width = sprite_height * initial_scale_factor,
+                    .height = sprite_height * initial_scale_factor,
+                };
+
+                // Don't allow updates if a round is in progress.
+                if (!round_in_progress) {
+
+                    // Is this button hot?
+                    if ((rl.CheckCollisionPointRec(mouse_pos, round_start_rec)) and
+                        (!prev_frame_input.l_mouse_button_is_down) and
+                        (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)))
+                    {
+                        hot_button_index = 1; // NOTE(caleb): This can be set to anything
+                    }
+                    // No..
+                    else if (!rl.CheckCollisionPointRec(mouse_pos, round_start_rec)) {
+                        hot_button_index = -1;
+                    }
+
+                    // Button is hot so make it smaller while left mouse is down.
+                    if (hot_button_index != -1) {
+                        round_start_rec.x += sprite_width * initial_scale_factor * 0.1 / 2.0;
+                        round_start_rec.y += sprite_height * initial_scale_factor * 0.1 / 2.0;
+                        round_start_rec.width *= 0.9;
+                        round_start_rec.height *= 0.9;
+                    }
+
+                    // Actually do the thing.
+                    if (hot_button_index != -1 and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
+                        hot_button_index = -1;
+                        round_in_progress = true;
+                        // TODO(caleb): round start
+                    }
+                }
+
                 // Enemy updates
                 for (alive_enemies.items) |*enemy| {
                     enemy.anim_timer += 1;
@@ -1453,7 +1550,7 @@ pub fn main() !void {
 
                 // Draw tower buy area
                 {
-                    var strz_buffer: [256]u8 = undefined;
+                    // var strz_buffer: [256]u8 = undefined;
                     rl.DrawRectangleRec(buy_area_rec, color_off_white);
 
                     var row_index: u32 = 0;
@@ -1478,20 +1575,41 @@ pub fn main() !void {
                                 .width = tower_buy_item_dim.x,
                                 .height = tower_buy_item_dim.y,
                             };
-                            rl.DrawTexturePro(tileset.tex, source_rect, tower_buy_item_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
+                            const tint = if (@intCast(i32, tower_data.cost) > money) rl.GRAY else rl.WHITE;
+                            rl.DrawTexturePro(tileset.tex, source_rect, tower_buy_item_rec, .{ .x = 0, .y = 0 }, 0, tint);
 
-                            const cost_bottom_pad_px = 2;
-                            const cost_strz = try std.fmt.bufPrintZ(&strz_buffer, "${d}", .{tower_data.cost});
-                            const cost_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, cost_strz), default_font_size, font_spacing);
-                            const cost_strz_pos = rl.Vector2{
-                                .x = buy_area_rec.x + @intToFloat(f32, col_index) * tower_buy_item_dim.x + (tower_buy_item_dim.x - cost_strz_dim.x) / 2,
-                                .y = buy_area_rec.y + @intToFloat(f32, row_index) * tower_buy_item_dim.y + (tower_buy_item_dim.y - cost_strz_dim.y - cost_bottom_pad_px),
-                            };
-                            rl.DrawRectangleV(cost_strz_pos, cost_strz_dim, rl.Color{ .r = color_off_white.r, .g = color_off_white.g, .b = color_off_white.b, .a = 210 });
-                            rl.DrawTextEx(font, @ptrCast([*c]const u8, cost_strz), cost_strz_pos, default_font_size, font_spacing, color_off_black);
+                            // TODO(caleb): Show cost ( possibly other info as well ) on hover.
+                            // const cost_bottom_pad_px = 2;
+                            // const cost_strz = try std.fmt.bufPrintZ(&strz_buffer, "${d}", .{tower_data.cost});
+                            // const cost_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, cost_strz), default_font_size, font_spacing);
+                            // const cost_strz_pos = rl.Vector2{
+                            //     .x = buy_area_rec.x + @intToFloat(f32, col_index) * tower_buy_item_dim.x + (tower_buy_item_dim.x - cost_strz_dim.x) / 2,
+                            //     .y = buy_area_rec.y + @intToFloat(f32, row_index) * tower_buy_item_dim.y + (tower_buy_item_dim.y - cost_strz_dim.y - cost_bottom_pad_px),
+                            // };
+                            // rl.DrawRectangleV(rl.Vector2{ .x = tower_buy_item_rec.x, .y = tower_buy_item_rec.y - cost_strz_dim.y }, rl.Vector2{ .x = tower_buy_item_rec.width, .y = cost_strz_dim.y }, tint);
+                            // rl.DrawTextEx(font, @ptrCast([*c]const u8, cost_strz), cost_strz_pos, default_font_size, font_spacing, color_off_black);
                             rl.DrawRectangleLinesEx(tower_buy_item_rec, 2, color_off_black);
                         }
                     }
+                }
+
+                // TODO(caleb): Pause button?
+
+                // Round play button
+                {
+                    var tint = rl.WHITE;
+                    if (round_in_progress) {
+                        tint = rl.GRAY;
+                    }
+                    var target_tile_row = @divTrunc(tileset.tile_name_to_id.get(hashString("play_button")).?, tileset.columns);
+                    var target_tile_column = @mod(tileset.tile_name_to_id.get(hashString("play_button")).?, tileset.columns);
+                    var button_source_rec = rl.Rectangle{
+                        .x = @intToFloat(f32, target_tile_column * sprite_width),
+                        .y = @intToFloat(f32, target_tile_row * sprite_height),
+                        .width = sprite_width,
+                        .height = sprite_height,
+                    };
+                    rl.DrawTexturePro(tileset.tex, button_source_rec, round_start_rec, .{ .x = 0, .y = 0 }, 0, tint);
                 }
 
                 try drawStatusBar(&font);
