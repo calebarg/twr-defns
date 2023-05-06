@@ -2,9 +2,10 @@
 // ========================
 // *Death animations
 // *HP and money icons
-// *Money/hp animation ( just need a list of vecs + amt lost or gained ).
 // *README ( how to play section )
 // *Handle spawn data past round 60 ( freeplay mode )
+
+// FIXME(caleb): After playing again round start button must be pressed twice.
 
 const std = @import("std");
 const rl = @import("raylib");
@@ -17,9 +18,9 @@ const AutoHashMap = std.AutoHashMap;
 const hashString = std.hash_map.hashString;
 
 const target_fps = 60;
-const tower_buy_area_sprite_scale = 0.8;
+const tower_buy_area_sprite_scale = 0.75;
 const tower_buy_area_towers_per_row = 1;
-const default_font_size = 18;
+const default_font_size = 20;
 const font_spacing = 2;
 const board_width_in_tiles = 16;
 const board_height_in_tiles = 16;
@@ -105,7 +106,7 @@ const RoundSpawns = struct {
 var enemies_data = [_]EnemyData{
     EnemyData{ // Gremlin wiz guy
         .hp = 1,
-        .move_speed = 1.0,
+        .move_speed = 40.0,
         .tile_id = undefined,
         .sprite_offset_x = 10,
         .sprite_offset_y = 14,
@@ -166,7 +167,7 @@ const tower_names = [_][*c]const u8{
 };
 
 const tower_descs = [_][*c]const u8{
-    "Some say it is an eye.",
+    "Your average tower that shoots enemies...\nWITH MIND BULLETS!!",
     "Placeholder desc 1",
     "Placeholder desc 2",
     "Placeholder desc 3",
@@ -269,6 +270,11 @@ const Projectile = struct {
 const DrawBufferEntry = struct {
     tile_pos: rl.Vector2,
     ts_id: u32,
+};
+
+const StatusChangeEntry = struct {
+    d_value: i32,
+    d_pos: rl.Vector2,
 };
 
 const Input = struct {
@@ -429,15 +435,6 @@ fn isoProjectInverted(screen_space_x: f32, screen_space_y: f32, tile_space_z: f3
     };
 }
 
-inline fn startBGPoses() [4]rl.Vector2 {
-    return [4]rl.Vector2{
-        rl.Vector2{ .x = @intToFloat(f32, -rl.GetScreenWidth()), .y = @intToFloat(f32, -rl.GetScreenHeight()) },
-        rl.Vector2{ .x = 0, .y = @intToFloat(f32, -rl.GetScreenHeight()) },
-        rl.Vector2{ .x = @intToFloat(f32, -rl.GetScreenWidth()), .y = 0 },
-        rl.Vector2{ .x = 0, .y = 0 },
-    };
-}
-
 fn drawTile(tileset: *Tileset, tile_id: u16, dest_pos: rl.Vector2, this_scale_factor: f32, tint: rl.Color) void {
     const dest_rect = rl.Rectangle{
         .x = dest_pos.x,
@@ -485,40 +482,13 @@ fn drawBoard(board_map: *Map, tileset: *Tileset, selected_tile_x: i32, selected_
     }
 }
 
-fn drawBackground(screen_dim: rl.Vector2, background_offset: f32, debug_bg_scroll: bool, bg_poses: *[4]rl.Vector2, bg_tex: *rl.Texture, hor_osc_shader: *rl.Shader) void {
-    _ = hor_osc_shader;
-    _ = bg_tex;
-    // const bg_source_rec = rl.Rectangle{
-    //     .x = 0,
-    //     .y = 0,
-    //     .width = @intToFloat(f32, bg_tex.width),
-    //     .height = -@intToFloat(f32, bg_tex.height),
-    // };
-
-    // rl.BeginShaderMode(hor_osc_shader.*);
-    // for (bg_poses) |bg_pos| {
-    //     const bg_dest_rec = rl.Rectangle{
-    //         .x = bg_pos.x,
-    //         .y = bg_pos.y,
-    //         .width = screen_dim.x,
-    //         .height = screen_dim.y,
-    //     };
-    //     rl.DrawTexturePro(bg_tex.*, bg_source_rec, bg_dest_rec, .{ .x = 0, .y = 0 }, 0, rl.WHITE);
-    // }
-    // rl.EndShaderMode();
+fn drawBackground(screen_dim: rl.Vector2, background_offset: f32) void {
     rl.ClearBackground(color_off_white);
-    var i: i32 = 0;
-    while (i < 9) : (i += 1) {
-        // TODO(caleb): FIXME
-        rl.DrawLineEx(rl.Vector2{ .x = -10, .y = @intToFloat(f32, i * 30 + @floatToInt(i32, background_offset) - 20) }, rl.Vector2{ .x = screen_dim.x + 10, .y = @intToFloat(f32, i * 30 - 110) + background_offset }, 15, color_off_);
-    }
-    if (debug_bg_scroll) {
-        for (bg_poses) |bg_pos| {
-            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x + 30, .y = bg_pos.y }, 3, rl.RED);
-            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x - 30, .y = bg_pos.y }, 3, rl.RED);
-            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y + 30 }, 3, rl.RED);
-            rl.DrawLineEx(bg_pos, rl.Vector2{ .x = bg_pos.x, .y = bg_pos.y - 30 }, 3, rl.RED);
-        }
+    var i: i32 = 0; // NOTE(caleb): Don't look to closely at these numbers. They will hurt your eyes.
+    while (i < 18) : (i += 1) {
+        const start_pos = rl.Vector2{ .x = -40, .y = @intToFloat(f32, i * 120 + @floatToInt(i32, background_offset) - 80) };
+        const end_pos = rl.Vector2{ .x = screen_dim.x + 40, .y = @intToFloat(f32, i * 120 - 440) + background_offset };
+        rl.DrawLineEx(start_pos, end_pos, 60, color_off_black);
     }
 }
 
@@ -655,7 +625,7 @@ inline fn drawDebugOrigin(screen_mid: rl.Vector2, debug_origin: bool) void {
     }
 }
 
-inline fn drawStatusBar(font: *rl.Font) !void {
+fn drawStatusBar(font: *rl.Font, money_change: *ArrayList(StatusChangeEntry), hp_change: *ArrayList(StatusChangeEntry)) !void {
     var strz_buffer: [256]u8 = undefined;
     var info_box_width: f32 = 0;
     const xy_pad_in_pixels = 10;
@@ -679,6 +649,26 @@ inline fn drawStatusBar(font: *rl.Font) !void {
     rl.DrawRectangleLinesEx(info_rec, 2, color_off_black);
     rl.DrawTextEx(font.*, @ptrCast([*c]const u8, money_strz), rl.Vector2{ .x = xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
     rl.DrawTextEx(font.*, @ptrCast([*c]const u8, hp_strz), rl.Vector2{ .x = money_strz_dim.x + xy_pad_in_pixels + xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
+
+    for (money_change.items) |money_change_entry| {
+        var change_strz: [:0]u8 = undefined;
+        if (money_change_entry.d_value > 0) {
+            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "+{d}", .{money_change_entry.d_value});
+        } else {
+            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "-{d}", .{money_change_entry.d_value});
+        }
+        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, change_strz), rl.Vector2{ .x = xy_pad_in_pixels, .y = xy_pad_in_pixels + money_change_entry.d_pos.y }, default_font_size, font_spacing, rl.Color{ .r = color_off_black.r, .g = color_off_black.g, .b = color_off_black.b, .a = @floatToInt(u8, @max(0, 255 - @round(money_change_entry.d_pos.y) * 10)) });
+    }
+
+    for (hp_change.items) |hp_change_entry| {
+        var change_strz: [:0]u8 = undefined;
+        if (hp_change_entry.d_value > 0) {
+            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "+{d}", .{hp_change_entry.d_value});
+        } else {
+            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "{d}", .{hp_change_entry.d_value});
+        }
+        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, change_strz), rl.Vector2{ .x = money_strz_dim.x + xy_pad_in_pixels + xy_pad_in_pixels, .y = xy_pad_in_pixels + hp_change_entry.d_pos.y }, default_font_size, font_spacing, rl.Color{ .r = color_off_black.r, .g = color_off_black.g, .b = color_off_black.b, .a = @floatToInt(u8, @max(0, 255 - @round(hp_change_entry.d_pos.y) * 10)) });
+    }
 }
 
 inline fn resetGameState(towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy), dead_enemies: *ArrayList(Enemy)) void {
@@ -688,7 +678,7 @@ inline fn resetGameState(towers: *ArrayList(Tower), alive_enemies: *ArrayList(En
     money = 100;
     hp = 100;
     score = 0;
-    round = 0;
+    round = 1;
 }
 
 pub fn main() !void {
@@ -700,7 +690,7 @@ pub fn main() !void {
     rl.SetTargetFPS(target_fps);
     rl.SetTraceLogLevel(@enumToInt(rl.TraceLogLevel.LOG_ERROR));
 
-    const window_icon = rl.LoadImage("assets/icon.png");
+    const window_icon = rl.LoadImage("data/images/icon.png");
     rl.SetWindowIcon(window_icon);
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -709,25 +699,21 @@ pub fn main() !void {
     var fba = std.heap.FixedBufferAllocator.init(push_buffer);
 
     rl.InitAudioDevice();
-    var music = rl.LoadMusicStream("assets/grasslands.wav");
+    var music = rl.LoadMusicStream("data/images/grasslands.wav");
     rl.SetMasterVolume(0.1);
     rl.SetMusicVolume(music, 0.3);
     rl.PlayMusicStream(music);
 
-    const shoot_sound = rl.LoadSound("assets/shoot.wav");
-    const hit_sound = rl.LoadSound("assets/hit.wav");
-    const dead_sound = rl.LoadSound("assets/ded.wav");
+    const shoot_sound = rl.LoadSound("data/sfx/shoot.wav");
+    const hit_sound = rl.LoadSound("data/sfx/hit.wav");
+    const dead_sound = rl.LoadSound("data/sfx/ded.wav");
     rl.SetSoundVolume(shoot_sound, 0.5);
     rl.SetSoundVolume(hit_sound, 0.2);
     rl.SetSoundVolume(dead_sound, 0.2);
 
-    var font = rl.LoadFont("assets/PICO-8_mono.ttf");
-    var bg_tex = rl.LoadTexture("assets/bg.png");
-    var splash_text_tex = rl.LoadTexture("assets/splash_text.png");
-    var tileset_tex = rl.LoadTexture("assets/isosheet.png");
-    var hor_osc_shader = rl.LoadShader(0, rl.TextFormat("src/hor_osc.fs", @intCast(c_int, 330)));
-    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_width"), &@intToFloat(f32, rl.GetScreenWidth()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-    rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_height"), &@intToFloat(f32, rl.GetScreenHeight()), @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
+    var font = rl.LoadFont("data/PICO-8_mono.ttf");
+    var splash_text_tex = rl.LoadTexture("data/images/splash_text.png");
+    var tileset_tex = rl.LoadTexture("data/images/isosheet.png");
 
     var parser = std.json.Parser.init(ally, false);
     defer parser.deinit();
@@ -736,7 +722,7 @@ pub fn main() !void {
     tileset.tex = tileset_tex;
     tileset.tile_name_to_id = AutoHashMap(u64, u16).init(ally);
     {
-        const tileset_file = try std.fs.cwd().openFile("assets/isosheet.tsj", .{});
+        const tileset_file = try std.fs.cwd().openFile("data/images/isosheet.tsj", .{});
         defer tileset_file.close();
         var raw_tileset_json = try tileset_file.reader().readAllAlloc(ally, 1024 * 5); // 5kib should be enough
         defer ally.free(raw_tileset_json);
@@ -771,7 +757,7 @@ pub fn main() !void {
     board_map.tile_indicies = ArrayList(u16).init(ally);
     defer board_map.tile_indicies.deinit();
     {
-        const map_file = try std.fs.cwd().openFile("assets/map1.tmj", .{});
+        const map_file = try std.fs.cwd().openFile("data/map1.tmj", .{});
         defer map_file.close();
         var map_json = try map_file.reader().readAllAlloc(ally, 1024 * 10);
         defer ally.free(map_json);
@@ -794,7 +780,7 @@ pub fn main() !void {
 
     var round_spawn_data: [60]RoundSpawns = undefined;
     {
-        const round_info_file = try std.fs.cwd().openFile("assets/round_info.json", .{});
+        const round_info_file = try std.fs.cwd().openFile("data/round_info.json", .{});
         defer round_info_file.close();
         var round_info_json = try round_info_file.reader().readAllAlloc(ally, 1024 * 10);
         defer ally.free(round_info_json);
@@ -822,25 +808,21 @@ pub fn main() !void {
 
     var debug_projectile = false;
     var debug_origin = false;
-    var debug_bg_scroll = false;
     var debug_hit_boxes = false;
     var debug_text_info = false;
 
     var towers = std.ArrayList(Tower).init(ally);
-    defer towers.deinit();
     var alive_enemies = std.ArrayList(Enemy).init(ally);
-    defer alive_enemies.deinit();
     var dead_enemies = std.ArrayList(Enemy).init(ally);
-    defer dead_enemies.deinit();
     var projectiles = std.ArrayList(Projectile).init(ally);
-    defer projectiles.deinit();
+    var money_change = std.ArrayList(StatusChangeEntry).init(ally);
+    var hp_change = std.ArrayList(StatusChangeEntry).init(ally);
 
     var bg_offset: f32 = 0;
     var splash_text_pos = rl.Vector2{
         .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - @intToFloat(f32, splash_text_tex.width) * initial_scale_factor / 2.0,
         .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
     };
-    var bg_poses = startBGPoses();
     var hot_button_index: i32 = -1;
     var prev_frame_screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
     var prev_frame_input = Input{ .l_mouse_button_is_down = false, .mouse_pos = rl.Vector2{ .x = 0, .y = 0 } };
@@ -894,36 +876,18 @@ pub fn main() !void {
             board_translation = rlm.Vector2Add(board_translation, rl.GetMouseDelta());
 
         if (rlm.Vector2Equals(prev_frame_screen_dim, screen_dim) == 0) {
-            bg_poses = startBGPoses();
             splash_text_pos = rl.Vector2{
                 .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - @intToFloat(f32, splash_text_tex.width) * initial_scale_factor / 2.0,
                 .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
             };
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_width"), &screen_dim.x, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
-            rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "render_height"), &screen_dim.y, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
         }
         const time_in_seconds = @floatCast(f32, rl.GetTime());
-        rl.SetShaderValue(hor_osc_shader, rl.GetShaderLocation(hor_osc_shader, "time_in_seconds"), &time_in_seconds, @enumToInt(rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT));
 
-        bg_offset = @intToFloat(f32, @floatToInt(u32, bg_offset + 0.25) % 30);
-        // for (bg_poses) |*bg_pos| {
-        //     bg_pos.* = rlm.Vector2Add(bg_pos.*, bg_pos_move);
-        //     if (bg_pos.x > screen_dim.x) {
-        //         bg_pos.x = -screen_dim.x + (bg_pos.x - screen_dim.x);
-        //     } else if (bg_pos.x < -screen_dim.x) {
-        //         bg_pos.x = screen_dim.x - (-screen_dim.x - bg_pos.x);
-        //     }
-        //     if (bg_pos.y > screen_dim.y) {
-        //         bg_pos.y = -screen_dim.y + (bg_pos.y - screen_dim.y);
-        //     } else if (bg_pos.y < -screen_dim.y) {
-        //         bg_pos.y = screen_dim.y - (-screen_dim.y - bg_pos.y);
-        //     }
-        // }
+        bg_offset = (bg_offset + 0.25 - @floor(bg_offset)) + @intToFloat(f32, @floatToInt(u32, bg_offset) % 120);
 
         if (rl.IsKeyPressed(rl.KeyboardKey.KEY_F1)) {
             debug_projectile = !debug_projectile;
             debug_origin = !debug_origin;
-            debug_bg_scroll = !debug_bg_scroll;
             debug_hit_boxes = !debug_hit_boxes;
             debug_text_info = !debug_text_info;
         }
@@ -987,7 +951,7 @@ pub fn main() !void {
 
                 // Title-screen render -------------------------------------------------------------------------
                 rl.BeginDrawing();
-                drawBackground(screen_dim, bg_offset, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
+                drawBackground(screen_dim, bg_offset);
                 drawBoard(&board_map, &tileset, -1, -1, null, -1);
                 rl.DrawTextureEx(splash_text_tex, rl.Vector2{ .x = splash_text_pos.x, .y = splash_text_pos.y + y_offset }, 0, initial_scale_factor, rl.WHITE);
                 if (splash_text_in_mid) {
@@ -1036,6 +1000,7 @@ pub fn main() !void {
 
                     if (@intCast(i32, rec_index) == hot_button_index and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
                         if (rec_index == 0) {
+                            round_in_progress = false;
                             resetGameState(&towers, &alive_enemies, &dead_enemies);
                             game_mode = GameMode.running;
                         } else if (rec_index == 1) {
@@ -1057,12 +1022,12 @@ pub fn main() !void {
 
                 // Game over render -------------------------------------------------------------------------
                 rl.BeginDrawing();
-                drawBackground(screen_dim, bg_offset, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
+                drawBackground(screen_dim, bg_offset);
                 drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
                 try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies, &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
                 try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
                 drawDebugOrigin(screen_mid, debug_origin);
-                try drawStatusBar(&font);
+                try drawStatusBar(&font, &money_change, &hp_change);
                 rl.DrawTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_strz_pos, game_over_font_size, font_spacing, color_off_black);
                 drawTile(&tileset, tileset.tile_name_to_id.get(hashString("retry_button")).?, rl.Vector2{ .x = button_dest_recs[0].x, .y = button_dest_recs[0].y }, initial_scale_factor, rl.WHITE);
                 drawTile(&tileset, tileset.tile_name_to_id.get(hashString("menu_button")).?, rl.Vector2{ .x = button_dest_recs[1].x, .y = button_dest_recs[1].y }, initial_scale_factor, rl.WHITE);
@@ -1174,6 +1139,7 @@ pub fn main() !void {
                                 try towers.append(new_tower);
                             }
                             money -= @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost);
+                            try money_change.append(StatusChangeEntry{ .d_value = -@intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost), .d_pos = rl.Vector2{ .x = 0, .y = 0 } });
                         }
                     }
                     tower_index_being_placed = -1;
@@ -1258,8 +1224,9 @@ pub fn main() !void {
                         alive_enemy_index -= 1;
                         continue;
                     } else if (!boundsCheck(@floatToInt(i32, @floor(enemy.pos.x)), @floatToInt(i32, @floor(enemy.pos.y)))) { // End of track
-                        _ = alive_enemies.orderedRemove(@intCast(u32, alive_enemy_index));
                         hp = @max(0, hp - enemy.hp);
+                        try hp_change.append(StatusChangeEntry{ .d_value = -enemy.hp, .d_pos = rl.Vector2{ .x = 0, .y = 0 } });
+                        _ = alive_enemies.orderedRemove(@intCast(u32, alive_enemy_index));
                         alive_enemy_index -= 1;
                         continue;
                     }
@@ -1380,9 +1347,28 @@ pub fn main() !void {
                 prev_frame_screen_dim = screen_dim;
                 last_time_ms = rl.GetTime() * 1000;
 
+                var money_change_index: i32 = 0;
+                while (money_change_index < money_change.items.len) : (money_change_index += 1) {
+                    var money_change_entry = &money_change.items[@intCast(u32, money_change_index)];
+                    money_change_entry.d_pos.y += 1;
+                    if (money_change_entry.d_pos.y > 40) {
+                        _ = money_change.orderedRemove(@intCast(u32, money_change_index));
+                        money_change_index -= 1;
+                    }
+                }
+                var hp_change_index: i32 = 0;
+                while (hp_change_index < hp_change.items.len) : (hp_change_index += 1) {
+                    var hp_change_entry = &hp_change.items[@intCast(u32, hp_change_index)];
+                    hp_change_entry.d_pos.y += 1;
+                    if (hp_change_entry.d_pos.y > 40) {
+                        _ = hp_change.orderedRemove(@intCast(u32, hp_change_index));
+                        hp_change_index -= 1;
+                    }
+                }
+
                 // Render -------------------------------------------------------------------------
                 rl.BeginDrawing();
-                drawBackground(screen_dim, bg_offset, debug_bg_scroll, &bg_poses, &bg_tex, &hor_osc_shader);
+                drawBackground(screen_dim, bg_offset);
                 drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
                 try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies, &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
 
@@ -1410,24 +1396,41 @@ pub fn main() !void {
                         };
                         const tint = if (@intCast(i32, tower_data.cost) > money) rl.GRAY else rl.WHITE;
                         rl.DrawTexturePro(tileset.tex, source_rect, tower_buy_item_rec, .{ .x = 0, .y = 0 }, 0, tint);
-
-                        // TODO(caleb): Show cost ( possibly other info as well ) on hover.
-                        // const cost_bottom_pad_px = 2;
-                        // const cost_strz = try std.fmt.bufPrintZ(&strz_buffer, "${d}", .{tower_data.cost});
-                        // const cost_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, cost_strz), default_font_size, font_spacing);
-                        // const cost_strz_pos = rl.Vector2{
-                        //     .x = buy_area_rec.x + @intToFloat(f32, col_index) * tower_buy_item_dim.x + (tower_buy_item_dim.x - cost_strz_dim.x) / 2,
-                        //     .y = buy_area_rec.y + @intToFloat(f32, row_index) * tower_buy_item_dim.y + (tower_buy_item_dim.y - cost_strz_dim.y - cost_bottom_pad_px),
-                        // };
-                        // rl.DrawRectangleV(rl.Vector2{ .x = tower_buy_item_rec.x, .y = tower_buy_item_rec.y - cost_strz_dim.y }, rl.Vector2{ .x = tower_buy_item_rec.width, .y = cost_strz_dim.y }, tint);
-                        // rl.DrawTextEx(font, @ptrCast([*c]const u8, cost_strz), cost_strz_pos, default_font_size, font_spacing, color_off_black);
                         rl.DrawRectangleLinesEx(tower_buy_item_rec, 2, color_off_black);
+
+                        if (rl.CheckCollisionPointRec(mouse_pos, tower_buy_item_rec)) {
+                            var strz_buffer: [256]u8 = undefined;
+                            const moused_over_tower_index = row_index * tower_buy_area_towers_per_row + col_index;
+
+                            const name_strz = try std.fmt.bufPrintZ(&strz_buffer, "Name -- {s}", .{tower_names[moused_over_tower_index]});
+                            const desc_strz_start = std.zig.c_builtins.__builtin_strlen(@ptrCast([*c]const u8, name_strz)) + 1;
+                            const desc_strz = try std.fmt.bufPrintZ(strz_buffer[desc_strz_start..], "Desc -- {s}", .{tower_descs[moused_over_tower_index]});
+                            const cost_strz_start = desc_strz_start + std.zig.c_builtins.__builtin_strlen(@ptrCast([*c]const u8, desc_strz)) + 1;
+                            const cost_strz = try std.fmt.bufPrintZ(strz_buffer[cost_strz_start..], "Cost -- ${d}", .{towers_data[moused_over_tower_index].cost});
+
+                            const name_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, name_strz), default_font_size, font_spacing);
+                            const desc_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, desc_strz), default_font_size, font_spacing);
+                            const cost_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, cost_strz), default_font_size, font_spacing);
+
+                            const dest_rec_width = @max(@max(name_strz_dim.x, desc_strz_dim.x), cost_strz_dim.x);
+
+                            const dest_rec = rl.Rectangle{
+                                .x = tower_buy_item_rec.x - dest_rec_width,
+                                .y = tower_buy_item_rec.y,
+                                .width = dest_rec_width,
+                                .height = name_strz_dim.y + desc_strz_dim.y + cost_strz_dim.y,
+                            };
+                            rl.DrawRectangleRec(dest_rec, color_off_white);
+                            rl.DrawTextEx(font, @ptrCast([*c]const u8, name_strz), rl.Vector2{ .x = dest_rec.x, .y = dest_rec.y }, default_font_size, font_spacing, color_off_black);
+                            rl.DrawTextEx(font, @ptrCast([*c]const u8, desc_strz), rl.Vector2{ .x = dest_rec.x, .y = dest_rec.y + name_strz_dim.y }, default_font_size, font_spacing, color_off_black);
+                            rl.DrawTextEx(font, @ptrCast([*c]const u8, cost_strz), rl.Vector2{ .x = dest_rec.x, .y = dest_rec.y + name_strz_dim.y + desc_strz_dim.y }, default_font_size, font_spacing, color_off_black);
+                        }
                     }
                 }
 
                 const round_start_button_tint = if (round_in_progress) rl.GRAY else rl.WHITE;
                 drawTile(&tileset, tileset.tile_name_to_id.get(hashString("play_button")).?, rl.Vector2{ .x = round_start_rec.x, .y = round_start_rec.y }, initial_scale_factor, round_start_button_tint);
-                try drawStatusBar(&font);
+                try drawStatusBar(&font, &money_change, &hp_change);
                 try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
                 drawDebugOrigin(screen_mid, debug_origin);
                 rl.EndDrawing();
