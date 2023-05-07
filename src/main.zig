@@ -1,11 +1,11 @@
 // TODO(caleb):
 // ========================
-// *Death animations
-// *HP and money icons
-// *README ( how to play section )
+// *HP and money icons ( also add round counter to status bar)
+// *Splash screen tweaks ( anim the board, text alig changes, text at bot. )
+// *Add enemy count to debug text section
 // *Handle spawn data past round 60 ( freeplay mode )
-
-// FIXME(caleb): After playing again round start button must be pressed twice.
+// *README ( how to play section )
+// *Modify tile id hashmap to also track sprite offsets.
 
 const std = @import("std");
 const rl = @import("raylib");
@@ -27,16 +27,50 @@ const board_height_in_tiles = 16;
 const sprite_width = 32;
 const sprite_height = 32;
 const anim_frames_speed = 7;
+const death_anim_frames_speed = 15;
 const color_off_black = rl.Color{ .r = 34, .g = 35, .b = 35, .a = 255 };
 const color_off_white = rl.Color{ .r = 240, .g = 246, .b = 240, .a = 255 };
 const initial_scale_factor = 4;
 
 var scale_factor: f32 = initial_scale_factor;
 var board_translation = rl.Vector2{ .x = 0, .y = 0 };
-var money: i32 = 100;
-var hp: i32 = 100;
-var score: u32 = 0;
-var round: u32 = 0;
+
+const GameState = struct {
+    money: i32,
+    hp: i32,
+    round: u32,
+    selected_tower: ?*Tower,
+    tower_index_being_placed: i32,
+    round_in_progress: bool,
+    round_gsd: [@enumToInt(EnemyKind.count)]GroupSpawnData,
+
+    towers: ArrayList(Tower),
+    alive_enemies: ArrayList(Enemy),
+    dead_enemies: ArrayList(DeadEnemy),
+    projectiles: ArrayList(Projectile),
+    money_change: ArrayList(StatusChangeEntry),
+    hp_change: ArrayList(StatusChangeEntry),
+
+    pub fn reset(self: *GameState) void {
+        self.money = 100;
+        self.hp = 200;
+        self.round = 0;
+        self.selected_tower = null;
+        self.tower_index_being_placed = -1;
+        self.round_in_progress = false;
+        for (self.round_gsd) |*gsd_entry| {
+            gsd_entry.time_between_spawns_ms = 0;
+            gsd_entry.spawn_count = 0;
+        }
+
+        self.towers.clearRetainingCapacity();
+        self.alive_enemies.clearRetainingCapacity();
+        self.dead_enemies.clearRetainingCapacity();
+        self.projectiles.clearRetainingCapacity();
+        self.money_change.clearRetainingCapacity();
+        self.hp_change.clearRetainingCapacity();
+    }
+};
 
 const Tileset = struct {
     columns: u16,
@@ -106,12 +140,18 @@ const RoundSpawns = struct {
 var enemies_data = [_]EnemyData{
     EnemyData{ // Gremlin wiz guy
         .hp = 1,
-        .move_speed = 40.0,
+        .move_speed = 1.0,
         .tile_id = undefined,
         .sprite_offset_x = 10,
         .sprite_offset_y = 14,
         .tile_steps_per_second = 64,
     },
+};
+
+const DeadEnemy = struct {
+    pos: rl.Vector2,
+    anim_frame: u8,
+    anim_timer: u8,
 };
 
 const Enemy = struct {
@@ -492,7 +532,7 @@ fn drawBackground(screen_dim: rl.Vector2, background_offset: f32) void {
     }
 }
 
-fn drawSprites(fba: *FixedBufferAllocator, tileset: *Tileset, debug_hit_boxes: bool, debug_projectile: bool, towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy), projectiles: *ArrayList(Projectile), selected_tile_x: i32, selected_tile_y: i32, tower_index_being_placed: i32, tba_anim_frame: u8) !void {
+fn drawSprites(fba: *FixedBufferAllocator, tileset: *Tileset, debug_hit_boxes: bool, debug_projectile: bool, towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy), dead_enemies: *ArrayList(DeadEnemy), projectiles: *ArrayList(Projectile), selected_tile_x: i32, selected_tile_y: i32, tower_index_being_placed: i32, tba_anim_frame: u8) !void {
     fba.reset();
     var draw_list = std.ArrayList(DrawBufferEntry).init(fba.allocator());
 
@@ -515,7 +555,6 @@ fn drawSprites(fba: *FixedBufferAllocator, tileset: *Tileset, debug_hit_boxes: b
 
         if (alive_enemies.items.len > entry_index) {
             const enemy = alive_enemies.items[entry_index];
-
             new_entries[added_entries] = DrawBufferEntry{
                 .tile_pos = rl.Vector2{
                     .x = enemy.pos.x,
@@ -526,12 +565,22 @@ fn drawSprites(fba: *FixedBufferAllocator, tileset: *Tileset, debug_hit_boxes: b
             added_entries += 1;
         }
 
+        if (dead_enemies.items.len > entry_index) {
+            const dead_enemy = dead_enemies.items[entry_index];
+            new_entries[added_entries] = DrawBufferEntry{
+                .tile_pos = rl.Vector2{
+                    .x = dead_enemy.pos.x,
+                    .y = dead_enemy.pos.y,
+                },
+                .ts_id = tileset.tile_name_to_id.get(hashString("death_anim")).? + dead_enemy.anim_frame,
+            };
+            added_entries += 1;
+        }
+
         for (new_entries[0..added_entries]) |new_entry| {
             var did_insert_entry = false;
             for (draw_list.items) |draw_list_entry, curr_entry_index| {
-                if ((new_entry.tile_pos.y < draw_list_entry.tile_pos.y) and
-                    (new_entry.tile_pos.x > draw_list_entry.tile_pos.x))
-                {
+                if (new_entry.tile_pos.y < draw_list_entry.tile_pos.y) {
                     try draw_list.insert(curr_entry_index, new_entry);
                     did_insert_entry = true;
                     break;
@@ -625,60 +674,66 @@ inline fn drawDebugOrigin(screen_mid: rl.Vector2, debug_origin: bool) void {
     }
 }
 
-fn drawStatusBar(font: *rl.Font, money_change: *ArrayList(StatusChangeEntry), hp_change: *ArrayList(StatusChangeEntry)) !void {
+fn drawStatusBar(font: *rl.Font, tileset: *Tileset, money: i32, hp: i32, money_change: *ArrayList(StatusChangeEntry), hp_change: *ArrayList(StatusChangeEntry)) !void {
+    _ = hp_change;
     var strz_buffer: [256]u8 = undefined;
-    var info_box_width: f32 = 0;
-    const xy_pad_in_pixels = 10;
+    // const xy_pad_in_pixels = 10;
 
-    var money_strz = try std.fmt.bufPrintZ(&strz_buffer, "MONEY:${d}", .{money});
-    const byte_offset = std.zig.c_builtins.__builtin_strlen(@ptrCast([*c]const u8, money_strz)) + 1;
+    var money_strz = try std.fmt.bufPrintZ(&strz_buffer, "{d}", .{money});
     const money_strz_dim = rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, money_strz), default_font_size, font_spacing);
-    info_box_width += money_strz_dim.x;
 
-    const hp_strz = try std.fmt.bufPrintZ(strz_buffer[byte_offset..], "HP:{d}", .{hp});
+    const hp_strz_start = std.zig.c_builtins.__builtin_strlen(@ptrCast([*c]const u8, money_strz)) + 1;
+    const hp_strz = try std.fmt.bufPrintZ(strz_buffer[hp_strz_start..], "{d}", .{hp});
     const hp_strz_dim = rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, hp_strz), default_font_size, font_spacing);
-    info_box_width += hp_strz_dim.x;
 
-    const info_rec = rl.Rectangle{
-        .x = 0,
-        .y = 0,
-        .width = info_box_width + xy_pad_in_pixels * 3,
-        .height = hp_strz_dim.y + xy_pad_in_pixels * 2,
+    const money_sprite_offset_y = 9;
+    const money_sprite_offset_x = 6;
+    const money_status_rec = rl.Rectangle{
+        .x = ((initial_scale_factor / 2) * (sprite_width - money_sprite_offset_x)) / 2,
+        .y = ((initial_scale_factor / 2) * (sprite_height - money_sprite_offset_y) - (initial_scale_factor / 2) * (sprite_height - money_sprite_offset_y) * 0.60) / 2.0,
+        .width = (initial_scale_factor / 2) * (sprite_width - money_sprite_offset_x) + money_strz_dim.x,
+        .height = (initial_scale_factor / 2) * (sprite_height - money_sprite_offset_y) * 0.60,
     };
-    rl.DrawRectangleRec(info_rec, color_off_white);
-    rl.DrawRectangleLinesEx(info_rec, 2, color_off_black);
-    rl.DrawTextEx(font.*, @ptrCast([*c]const u8, money_strz), rl.Vector2{ .x = xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
-    rl.DrawTextEx(font.*, @ptrCast([*c]const u8, hp_strz), rl.Vector2{ .x = money_strz_dim.x + xy_pad_in_pixels + xy_pad_in_pixels, .y = xy_pad_in_pixels }, default_font_size, font_spacing, color_off_black);
 
+    rl.DrawRectangleRounded(money_status_rec, 10, 4, color_off_white);
+    rl.DrawRectangleRoundedLines(money_status_rec, 10, 4, 2, color_off_black);
+    drawTile(tileset, tileset.tile_name_to_id.get(hashString("money_icon")).?, rl.Vector2{ .x = -(initial_scale_factor / 2) * money_sprite_offset_x, .y = -(initial_scale_factor / 2) * money_sprite_offset_y }, initial_scale_factor / 2, rl.WHITE);
+    rl.DrawTextEx(font.*, @ptrCast([*c]const u8, money_strz), rl.Vector2{ .x = (initial_scale_factor / 2) * (sprite_width - money_sprite_offset_x), .y = money_status_rec.height / 2 }, default_font_size, font_spacing, color_off_black);
+
+    const hp_sprite_offset_y = 9;
+    const hp_sprite_offset_x = 4;
+    const hp_status_rec = rl.Rectangle{
+        .x = ((initial_scale_factor / 2) * (sprite_width - hp_sprite_offset_x)) / 2,
+        .y = ((initial_scale_factor / 2) * (sprite_height - hp_sprite_offset_y) - (initial_scale_factor / 2) * (sprite_height - hp_sprite_offset_y) * 0.60) / 2.0 + (sprite_height - hp_sprite_offset_y) * (initial_scale_factor / 2),
+        .width = (initial_scale_factor / 2) * (sprite_width - hp_sprite_offset_x) + hp_strz_dim.x,
+        .height = (initial_scale_factor / 2) * (sprite_height - hp_sprite_offset_y) * 0.60,
+    };
+
+    rl.DrawRectangleRounded(hp_status_rec, 10, 4, color_off_white);
+    rl.DrawRectangleRoundedLines(hp_status_rec, 10, 4, 2, color_off_black);
+    drawTile(tileset, tileset.tile_name_to_id.get(hashString("health_icon")).?, rl.Vector2{ .x = -(initial_scale_factor / 2) * hp_sprite_offset_x, .y = -(initial_scale_factor / 2) * hp_sprite_offset_y + (sprite_height - hp_sprite_offset_y) * (initial_scale_factor / 2) }, initial_scale_factor / 2, rl.WHITE);
+    rl.DrawTextEx(font.*, @ptrCast([*c]const u8, hp_strz), rl.Vector2{ .x = (initial_scale_factor / 2) * (sprite_width - hp_sprite_offset_x), .y = hp_status_rec.height / 2 + (sprite_height - hp_sprite_offset_y) * (initial_scale_factor / 2) }, default_font_size, font_spacing, color_off_black);
+
+    const sign_width = rl.MeasureTextEx(font.*, @ptrCast([*c]const u8, try std.fmt.bufPrintZ(&strz_buffer, "-", .{})), default_font_size, font_spacing).x;
     for (money_change.items) |money_change_entry| {
         var change_strz: [:0]u8 = undefined;
         if (money_change_entry.d_value > 0) {
             change_strz = try std.fmt.bufPrintZ(&strz_buffer, "+{d}", .{money_change_entry.d_value});
         } else {
-            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "-{d}", .{money_change_entry.d_value});
+            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "{d}", .{money_change_entry.d_value});
         }
-        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, change_strz), rl.Vector2{ .x = xy_pad_in_pixels, .y = xy_pad_in_pixels + money_change_entry.d_pos.y }, default_font_size, font_spacing, rl.Color{ .r = color_off_black.r, .g = color_off_black.g, .b = color_off_black.b, .a = @floatToInt(u8, @max(0, 255 - @round(money_change_entry.d_pos.y) * 10)) });
+        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, change_strz), rl.Vector2{ .x = (initial_scale_factor / 2) * (sprite_width - money_sprite_offset_x) - sign_width, .y = money_status_rec.height / 2 + money_change_entry.d_pos.y }, default_font_size, font_spacing, rl.Color{ .r = color_off_black.r, .g = color_off_black.g, .b = color_off_black.b, .a = @floatToInt(u8, @max(0, 255 - @round(money_change_entry.d_pos.y) * 10)) });
     }
 
-    for (hp_change.items) |hp_change_entry| {
-        var change_strz: [:0]u8 = undefined;
-        if (hp_change_entry.d_value > 0) {
-            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "+{d}", .{hp_change_entry.d_value});
-        } else {
-            change_strz = try std.fmt.bufPrintZ(&strz_buffer, "{d}", .{hp_change_entry.d_value});
-        }
-        rl.DrawTextEx(font.*, @ptrCast([*c]const u8, change_strz), rl.Vector2{ .x = money_strz_dim.x + xy_pad_in_pixels + xy_pad_in_pixels, .y = xy_pad_in_pixels + hp_change_entry.d_pos.y }, default_font_size, font_spacing, rl.Color{ .r = color_off_black.r, .g = color_off_black.g, .b = color_off_black.b, .a = @floatToInt(u8, @max(0, 255 - @round(hp_change_entry.d_pos.y) * 10)) });
-    }
-}
-
-inline fn resetGameState(towers: *ArrayList(Tower), alive_enemies: *ArrayList(Enemy), dead_enemies: *ArrayList(Enemy)) void {
-    towers.clearRetainingCapacity();
-    alive_enemies.clearRetainingCapacity();
-    dead_enemies.clearRetainingCapacity();
-    money = 100;
-    hp = 100;
-    score = 0;
-    round = 1;
+    // for (hp_change.items) |hp_change_entry| {
+    //     var change_strz: [:0]u8 = undefined;
+    //     if (hp_change_entry.d_value > 0) {
+    //         change_strz = try std.fmt.bufPrintZ(&strz_buffer, "+{d}", .{hp_change_entry.d_value});
+    //     } else {
+    //         change_strz = try std.fmt.bufPrintZ(&strz_buffer, "{d}", .{hp_change_entry.d_value});
+    //     }
+    //     rl.DrawTextEx(font.*, @ptrCast([*c]const u8, change_strz), rl.Vector2{ .x = money_strz_dim.x + xy_pad_in_pixels + xy_pad_in_pixels, .y = xy_pad_in_pixels + hp_change_entry.d_pos.y }, default_font_size, font_spacing, rl.Color{ .r = color_off_black.r, .g = color_off_black.g, .b = color_off_black.b, .a = @floatToInt(u8, @max(0, 255 - @round(hp_change_entry.d_pos.y) * 10)) });
+    // }
 }
 
 pub fn main() !void {
@@ -779,6 +834,8 @@ pub fn main() !void {
     }
 
     var round_spawn_data: [60]RoundSpawns = undefined;
+    for (round_spawn_data) |*rsd_entry|
+        rsd_entry.* = std.mem.zeroes(RoundSpawns);
     {
         const round_info_file = try std.fs.cwd().openFile("data/round_info.json", .{});
         defer round_info_file.close();
@@ -805,40 +862,33 @@ pub fn main() !void {
     }
 
     var game_mode = GameMode.title_screen;
+    var game_state: GameState = undefined;
+    game_state.reset();
+    game_state.towers = ArrayList(Tower).init(ally);
+    game_state.alive_enemies = ArrayList(Enemy).init(ally);
+    game_state.dead_enemies = ArrayList(DeadEnemy).init(ally);
+    game_state.projectiles = ArrayList(Projectile).init(ally);
+    game_state.money_change = ArrayList(StatusChangeEntry).init(ally);
+    game_state.hp_change = ArrayList(StatusChangeEntry).init(ally);
 
     var debug_projectile = false;
     var debug_origin = false;
     var debug_hit_boxes = false;
     var debug_text_info = false;
 
-    var towers = std.ArrayList(Tower).init(ally);
-    var alive_enemies = std.ArrayList(Enemy).init(ally);
-    var dead_enemies = std.ArrayList(Enemy).init(ally);
-    var projectiles = std.ArrayList(Projectile).init(ally);
-    var money_change = std.ArrayList(StatusChangeEntry).init(ally);
-    var hp_change = std.ArrayList(StatusChangeEntry).init(ally);
-
     var bg_offset: f32 = 0;
     var splash_text_pos = rl.Vector2{
         .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - @intToFloat(f32, splash_text_tex.width) * initial_scale_factor / 2.0,
         .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
     };
+
     var hot_button_index: i32 = -1;
     var prev_frame_screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
     var prev_frame_input = Input{ .l_mouse_button_is_down = false, .mouse_pos = rl.Vector2{ .x = 0, .y = 0 } };
     var last_time_ms = rl.GetTime() * 1000;
 
-    var round_in_progress = false;
-    var selected_tower: ?*Tower = null;
-    var tower_index_being_placed: i32 = -1;
-
     var tba_anim_frame: u8 = 0;
     var tba_anim_timer: u8 = 0;
-    var this_round_gsd: [@enumToInt(EnemyKind.count)]GroupSpawnData = undefined;
-    for (this_round_gsd) |*gsd_entry| {
-        gsd_entry.time_between_spawns_ms = 0;
-        gsd_entry.spawn_count = 0;
-    }
 
     var enemy_start_tile_y: u32 = 0;
     var enemy_start_tile_x: u32 = 0;
@@ -859,6 +909,7 @@ pub fn main() !void {
     }
 
     game_loop: while (!rl.WindowShouldClose()) {
+        // Gamemode agnostic updates -------------------------------------------------------------------------
         rl.UpdateMusicStream(music);
 
         const screen_dim = rl.Vector2{ .x = @intToFloat(f32, rl.GetScreenWidth()), .y = @intToFloat(f32, rl.GetScreenHeight()) };
@@ -867,7 +918,6 @@ pub fn main() !void {
             .y = screen_dim.y / 2,
         };
         const mouse_pos = rl.GetMousePosition();
-        scale_factor = clampf32(scale_factor + rl.GetMouseWheelMove(), 1, 10);
         var selected_tile_pos = isoProjectInverted(mouse_pos.x - sprite_width * scale_factor / 2, mouse_pos.y, 0);
         const selected_tile_x = @floatToInt(i32, @floor(selected_tile_pos.x));
         const selected_tile_y = @floatToInt(i32, @floor(selected_tile_pos.y));
@@ -881,8 +931,8 @@ pub fn main() !void {
                 .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
             };
         }
-        const time_in_seconds = @floatCast(f32, rl.GetTime());
 
+        scale_factor = clampf32(scale_factor + rl.GetMouseWheelMove(), 1, 10);
         bg_offset = (bg_offset + 0.25 - @floor(bg_offset)) + @intToFloat(f32, @floatToInt(u32, bg_offset) % 120);
 
         if (rl.IsKeyPressed(rl.KeyboardKey.KEY_F1)) {
@@ -891,6 +941,8 @@ pub fn main() !void {
             debug_hit_boxes = !debug_hit_boxes;
             debug_text_info = !debug_text_info;
         }
+
+        const time_in_seconds = @floatCast(f32, rl.GetTime());
 
         switch (game_mode) {
             .title_screen => {
@@ -937,7 +989,7 @@ pub fn main() !void {
 
                     if (@intCast(i32, rec_index) == hot_button_index and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
                         if (rec_index == 0) { // Play button
-                            resetGameState(&towers, &alive_enemies, &dead_enemies);
+                            game_state.reset();
                             game_mode = GameMode.running;
                         } else if (rec_index == 1) { // Quit button
                             break :game_loop;
@@ -964,7 +1016,7 @@ pub fn main() !void {
                 // Game over update -------------------------------------------------------------------------
                 var strz_buffer: [256]u8 = undefined;
                 const game_over_font_size = 18;
-                const game_over_strz = try std.fmt.bufPrintZ(&strz_buffer, "GAME OVER! -- SCORE: {d}", .{score});
+                const game_over_strz = try std.fmt.bufPrintZ(&strz_buffer, "GAME OVER! -- round: {d}", .{game_state.round});
                 const game_over_strz_dim = rl.MeasureTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_font_size, font_spacing);
                 const start_y = screen_mid.y + @sin(time_in_seconds * 10) * 5;
                 const game_over_strz_pos = rl.Vector2{ .x = screen_mid.x - game_over_strz_dim.x / 2, .y = start_y };
@@ -999,18 +1051,17 @@ pub fn main() !void {
                     }
 
                     if (@intCast(i32, rec_index) == hot_button_index and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
-                        if (rec_index == 0) {
-                            round_in_progress = false;
-                            resetGameState(&towers, &alive_enemies, &dead_enemies);
+                        if (rec_index == 0) { // Restart
+                            game_state.reset();
                             game_mode = GameMode.running;
-                        } else if (rec_index == 1) {
-                            resetGameState(&towers, &alive_enemies, &dead_enemies);
+                        } else if (rec_index == 1) { // Home
+                            game_state.reset();
                             game_mode = GameMode.title_screen;
                             splash_text_pos = rl.Vector2{
                                 .x = @intToFloat(f32, rl.GetScreenWidth()) / 2 - @intToFloat(f32, splash_text_tex.width) * initial_scale_factor / 2.0,
                                 .y = -@intToFloat(f32, splash_text_tex.height) * initial_scale_factor,
                             };
-                        } else if (rec_index == 2) {
+                        } else if (rec_index == 2) { // Quit
                             break :game_loop;
                         }
                     }
@@ -1023,11 +1074,11 @@ pub fn main() !void {
                 // Game over render -------------------------------------------------------------------------
                 rl.BeginDrawing();
                 drawBackground(screen_dim, bg_offset);
-                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
-                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies, &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
-                try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
+                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, game_state.selected_tower, game_state.tower_index_being_placed);
+                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &game_state.towers, &game_state.alive_enemies, &game_state.dead_enemies, &game_state.projectiles, selected_tile_x, selected_tile_y, game_state.tower_index_being_placed, tba_anim_frame);
+                try drawDebugTextInfo(&font, &game_state.towers, &game_state.projectiles, selected_tile_pos, screen_dim, debug_text_info);
                 drawDebugOrigin(screen_mid, debug_origin);
-                try drawStatusBar(&font, &money_change, &hp_change);
+                try drawStatusBar(&font, &tileset, game_state.money, game_state.hp, &game_state.money_change, &game_state.hp_change);
                 rl.DrawTextEx(font, @ptrCast([*c]const u8, game_over_strz), game_over_strz_pos, game_over_font_size, font_spacing, color_off_black);
                 drawTile(&tileset, tileset.tile_name_to_id.get(hashString("retry_button")).?, rl.Vector2{ .x = button_dest_recs[0].x, .y = button_dest_recs[0].y }, initial_scale_factor, rl.WHITE);
                 drawTile(&tileset, tileset.tile_name_to_id.get(hashString("menu_button")).?, rl.Vector2{ .x = button_dest_recs[1].x, .y = button_dest_recs[1].y }, initial_scale_factor, rl.WHITE);
@@ -1038,7 +1089,7 @@ pub fn main() !void {
                 const dtime_ms = @floatCast(f32, rl.GetTime() * 1000 - last_time_ms);
 
                 // Towers -------------------------------------------------------------------------
-                for (towers.items) |*tower| {
+                for (game_state.towers.items) |*tower| {
                     tower.anim_timer += 1;
                     if (tower.anim_timer >= @divTrunc(target_fps, anim_frames_speed)) {
                         tower.anim_timer = 0;
@@ -1049,7 +1100,7 @@ pub fn main() !void {
                     tower.fire_rate_timer += 1;
                     if (tower.fire_rate_timer >= @divTrunc(target_fps, tower.fire_rate)) {
                         tower.fire_rate_timer = 0;
-                        for (alive_enemies.items) |*enemy| {
+                        for (game_state.alive_enemies.items) |*enemy| {
                             const enemy_tile_x = @floatToInt(i32, @floor(enemy.pos.x));
                             const enemy_tile_y = @floatToInt(i32, @floor(enemy.pos.y));
                             if (std.math.absCast(enemy_tile_x - @intCast(i32, tower.tile_x)) + std.math.absCast(enemy_tile_y - @intCast(i32, tower.tile_y)) <= towers_data[@enumToInt(tower.kind)].range) {
@@ -1080,7 +1131,7 @@ pub fn main() !void {
                                     .speed = @intToFloat(f32, tower.fire_speed) / target_fps,
                                     .damage = towers_data[@enumToInt(tower.kind)].damage,
                                 };
-                                try projectiles.append(new_projectile);
+                                try game_state.projectiles.append(new_projectile);
                                 break;
                             }
                         }
@@ -1092,73 +1143,73 @@ pub fn main() !void {
                     if ((selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
                         (selected_tile_x >= 0) and (selected_tile_y >= 0))
                     {
-                        for (towers.items) |*tower| {
+                        for (game_state.towers.items) |*tower| {
                             if ((tower.tile_x == @intCast(u32, selected_tile_x)) and
                                 (tower.tile_y == @intCast(u32, selected_tile_y)))
                             {
                                 clicked_on_a_tower = true;
-                                selected_tower = tower;
+                                game_state.selected_tower = tower;
                                 break;
                             }
                         }
                     }
                     if (!clicked_on_a_tower) {
-                        selected_tower = null;
+                        game_state.selected_tower = null;
                     }
                 }
 
-                if (tower_index_being_placed >= 0 and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
+                if (game_state.tower_index_being_placed >= 0 and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) {
                     if ((selected_tile_x < board_width_in_tiles) and (selected_tile_y < board_height_in_tiles) and
                         (selected_tile_x >= 0) and (selected_tile_y >= 0))
                     {
                         const tile_index = board_map.tile_indicies.items[@intCast(u32, selected_tile_y * board_width_in_tiles + selected_tile_x)];
-                        if (!tileset.isTrackTile(tile_index) and !clicked_on_a_tower and money >=
-                            @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost))
+                        if (!tileset.isTrackTile(tile_index) and !clicked_on_a_tower and game_state.money >=
+                            @intCast(i32, towers_data[@intCast(u32, game_state.tower_index_being_placed)].cost))
                         {
-                            selected_tower = null;
+                            game_state.selected_tower = null;
                             const new_tower = Tower{
-                                .kind = @intToEnum(TowerKind, tower_index_being_placed),
+                                .kind = @intToEnum(TowerKind, game_state.tower_index_being_placed),
                                 .direction = Direction.down,
                                 .tile_x = @intCast(u16, selected_tile_x),
                                 .tile_y = @intCast(u16, selected_tile_y),
-                                .fire_rate = towers_data[@intCast(u32, tower_index_being_placed)].fire_rate,
-                                .fire_speed = towers_data[@intCast(u32, tower_index_being_placed)].fire_speed,
+                                .fire_rate = towers_data[@intCast(u32, game_state.tower_index_being_placed)].fire_rate,
+                                .fire_speed = towers_data[@intCast(u32, game_state.tower_index_being_placed)].fire_speed,
                                 .fire_rate_timer = 0,
                                 .anim_frame = 0,
                                 .anim_timer = 0,
                             };
                             var did_insert_tower = false;
-                            for (towers.items) |tower, tower_index| {
+                            for (game_state.towers.items) |tower, tower_index| {
                                 if (tower.tile_y >= new_tower.tile_y) {
-                                    try towers.insert(tower_index, new_tower);
+                                    try game_state.towers.insert(tower_index, new_tower);
                                     did_insert_tower = true;
                                     break;
                                 }
                             }
                             if (!did_insert_tower) {
-                                try towers.append(new_tower);
+                                try game_state.towers.append(new_tower);
                             }
-                            money -= @intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost);
-                            try money_change.append(StatusChangeEntry{ .d_value = -@intCast(i32, towers_data[@intCast(u32, tower_index_being_placed)].cost), .d_pos = rl.Vector2{ .x = 0, .y = 0 } });
+                            game_state.money -= @intCast(i32, towers_data[@intCast(u32, game_state.tower_index_being_placed)].cost);
+                            try game_state.money_change.append(StatusChangeEntry{ .d_value = -@intCast(i32, towers_data[@intCast(u32, game_state.tower_index_being_placed)].cost), .d_pos = rl.Vector2{ .x = 0, .y = 0 } });
                         }
                     }
-                    tower_index_being_placed = -1;
+                    game_state.tower_index_being_placed = -1;
                 }
 
                 // Projectiles -------------------------------------------------------------------------
                 var projectile_index: i32 = 0;
-                outer: while (projectile_index < projectiles.items.len) : (projectile_index += 1) {
-                    var projectile = &projectiles.items[@intCast(u32, projectile_index)];
+                outer: while (projectile_index < game_state.projectiles.items.len) : (projectile_index += 1) {
+                    var projectile = &game_state.projectiles.items[@intCast(u32, projectile_index)];
                     var projected_projectile_pos = isoProject(projectile.pos.x, projectile.pos.y, 1);
                     if ((@floor(projectile.pos.x) > board_width_in_tiles * 2) or
                         (@floor(projectile.pos.y) > board_height_in_tiles * 2) or
                         (projectile.pos.x < -board_width_in_tiles) or (projectile.pos.y < -board_height_in_tiles))
                     {
-                        _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
+                        _ = game_state.projectiles.orderedRemove(@intCast(u32, projectile_index));
                         projectile_index -= 1;
                         continue;
                     }
-                    for (alive_enemies.items) |*enemy| {
+                    for (game_state.alive_enemies.items) |*enemy| {
                         for (enemy.colliders) |collider| {
                             const projected_collider_pos = isoProject(collider.x, collider.y, 1);
                             const projected_collider_rec = rl.Rectangle{
@@ -1175,7 +1226,7 @@ pub fn main() !void {
                             };
                             if (rl.CheckCollisionRecs(projected_projectile_rec, projected_collider_rec)) {
                                 enemy.hp -= @intCast(i32, projectile.damage);
-                                _ = projectiles.orderedRemove(@intCast(u32, projectile_index));
+                                _ = game_state.projectiles.orderedRemove(@intCast(u32, projectile_index));
                                 projectile_index -= 1;
                                 rl.PlaySound(hit_sound);
                                 continue :outer;
@@ -1187,13 +1238,13 @@ pub fn main() !void {
                 }
 
                 // Enemies -------------------------------------------------------------------------
-                if (round_in_progress) {
-                    std.debug.assert(round > 0);
-                    const rsd = round_spawn_data[(round - 1) % round_spawn_data.len];
+                if (game_state.round_in_progress) {
+                    std.debug.assert(game_state.round > 0);
+                    const rsd = round_spawn_data[(game_state.round - 1) % round_spawn_data.len];
                     for (rsd.group_spawn_data[0..rsd.unique_enemies_for_this_round]) |gsd_entry, gsd_index| {
-                        this_round_gsd[gsd_index].time_between_spawns_ms += @floatToInt(u16, dtime_ms);
-                        if ((this_round_gsd[gsd_index].time_between_spawns_ms >= gsd_entry.time_between_spawns_ms) and
-                            (this_round_gsd[gsd_index].spawn_count < gsd_entry.spawn_count))
+                        game_state.round_gsd[gsd_index].time_between_spawns_ms += @floatToInt(u16, dtime_ms);
+                        if ((game_state.round_gsd[gsd_index].time_between_spawns_ms >= gsd_entry.time_between_spawns_ms) and
+                            (game_state.round_gsd[gsd_index].spawn_count < gsd_entry.spawn_count))
                         {
                             var new_enemy: Enemy = undefined;
                             new_enemy.kind = gsd_entry.kind;
@@ -1206,27 +1257,27 @@ pub fn main() !void {
                             new_enemy.anim_frame = 0;
                             new_enemy.anim_timer = 0;
                             new_enemy.initColliders();
-                            try alive_enemies.append(new_enemy);
+                            try game_state.alive_enemies.append(new_enemy);
 
-                            this_round_gsd[gsd_index].time_between_spawns_ms = 0;
-                            this_round_gsd[gsd_index].spawn_count += 1;
+                            game_state.round_gsd[gsd_index].time_between_spawns_ms = 0;
+                            game_state.round_gsd[gsd_index].spawn_count += 1;
                         }
                     }
                 }
 
                 var alive_enemy_index: i32 = 0;
-                while (alive_enemy_index < alive_enemies.items.len) : (alive_enemy_index += 1) {
-                    var enemy = &alive_enemies.items[@intCast(u32, alive_enemy_index)];
+                while (alive_enemy_index < game_state.alive_enemies.items.len) : (alive_enemy_index += 1) {
+                    var enemy = &game_state.alive_enemies.items[@intCast(u32, alive_enemy_index)];
                     if (enemy.hp <= 0) { // Handle death stuff now
                         rl.PlaySound(dead_sound);
-                        money += @intCast(i32, @enumToInt(enemy.kind)) + 1;
-                        try dead_enemies.append(alive_enemies.orderedRemove(@intCast(u32, alive_enemy_index)));
+                        game_state.money += @intCast(i32, @enumToInt(enemy.kind)) + 1;
+                        try game_state.dead_enemies.append(DeadEnemy{ .pos = game_state.alive_enemies.orderedRemove(@intCast(u32, alive_enemy_index)).pos, .anim_frame = 0, .anim_timer = 0 });
                         alive_enemy_index -= 1;
                         continue;
                     } else if (!boundsCheck(@floatToInt(i32, @floor(enemy.pos.x)), @floatToInt(i32, @floor(enemy.pos.y)))) { // End of track
-                        hp = @max(0, hp - enemy.hp);
-                        try hp_change.append(StatusChangeEntry{ .d_value = -enemy.hp, .d_pos = rl.Vector2{ .x = 0, .y = 0 } });
-                        _ = alive_enemies.orderedRemove(@intCast(u32, alive_enemy_index));
+                        game_state.hp = @max(0, game_state.hp - enemy.hp);
+                        try game_state.hp_change.append(StatusChangeEntry{ .d_value = -enemy.hp, .d_pos = rl.Vector2{ .x = 0, .y = 0 } });
+                        _ = game_state.alive_enemies.orderedRemove(@intCast(u32, alive_enemy_index));
                         alive_enemy_index -= 1;
                         continue;
                     }
@@ -1247,9 +1298,16 @@ pub fn main() !void {
                     }
                 }
                 var dead_enemy_index: i32 = 0;
-                while (dead_enemy_index < dead_enemies.items.len) : (dead_enemy_index += 1) {
-                    // TODO(caleb): Remove after death anim is done playing.
-                    _ = dead_enemies.orderedRemove(@intCast(u32, dead_enemy_index));
+                while (dead_enemy_index < game_state.dead_enemies.items.len) : (dead_enemy_index += 1) {
+                    var dead_enemy = &game_state.dead_enemies.items[@intCast(u32, dead_enemy_index)];
+                    dead_enemy.anim_timer += 1;
+                    if (dead_enemy.anim_timer >= @divTrunc(target_fps, death_anim_frames_speed)) {
+                        dead_enemy.anim_timer = 0;
+                        dead_enemy.anim_frame += 1;
+                    }
+                    if (dead_enemy.anim_frame > 3) {
+                        _ = game_state.dead_enemies.orderedRemove(@intCast(u32, dead_enemy_index));
+                    }
                 }
 
                 // Round  -------------------------------------------------------------------------
@@ -1259,7 +1317,7 @@ pub fn main() !void {
                     .width = sprite_height * initial_scale_factor,
                     .height = sprite_height * initial_scale_factor,
                 };
-                if (!round_in_progress) {
+                if (!game_state.round_in_progress) {
                     if ((rl.CheckCollisionPointRec(mouse_pos, round_start_rec)) and
                         (!prev_frame_input.l_mouse_button_is_down) and
                         (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)))
@@ -1276,21 +1334,21 @@ pub fn main() !void {
                     }
                     if (hot_button_index != -1 and rl.IsMouseButtonReleased(rl.MouseButton.MOUSE_BUTTON_LEFT)) { // Begin next round
                         hot_button_index = -1;
-                        round_in_progress = true;
-                        round += 1;
+                        game_state.round_in_progress = true;
+                        game_state.round += 1;
                     }
-                } else if (round_in_progress) {
-                    std.debug.assert(round > 0);
-                    const rsd = round_spawn_data[(round - 1) % round_spawn_data.len];
+                } else if (game_state.round_in_progress) {
+                    std.debug.assert(game_state.round > 0);
+                    const rsd = round_spawn_data[(game_state.round - 1) % round_spawn_data.len];
                     var everything_was_spawned = true;
-                    for (this_round_gsd) |gsd_entry, gsd_index| {
+                    for (game_state.round_gsd) |gsd_entry, gsd_index| {
                         if (gsd_entry.spawn_count < rsd.group_spawn_data[gsd_index].spawn_count) {
                             everything_was_spawned = false;
                             break;
                         }
                     }
-                    if (everything_was_spawned and alive_enemies.items.len == 0) { // End round
-                        round_in_progress = false;
+                    if (everything_was_spawned and game_state.alive_enemies.items.len == 0) { // End round
+                        game_state.round_in_progress = false;
                     }
                 }
 
@@ -1314,7 +1372,7 @@ pub fn main() !void {
                     if (tba_anim_frame > 3) tba_anim_frame = 0;
                 }
 
-                if ((tower_index_being_placed < 0) and
+                if ((game_state.tower_index_being_placed < 0) and
                     (rl.CheckCollisionPointRec(mouse_pos, buy_area_rec)) and
                     (rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT)) and
                     (!prev_frame_input.l_mouse_button_is_down))
@@ -1333,8 +1391,8 @@ pub fn main() !void {
                             };
 
                             if (rl.CheckCollisionPointRec(mouse_pos, tower_buy_item_rec)) {
-                                selected_tower = null;
-                                tower_index_being_placed = @intCast(i32, selected_row * tower_buy_area_towers_per_row + selected_col);
+                                game_state.selected_tower = null;
+                                game_state.tower_index_being_placed = @intCast(i32, selected_row * tower_buy_area_towers_per_row + selected_col);
                                 break :outer;
                             }
                         }
@@ -1342,35 +1400,36 @@ pub fn main() !void {
                 }
 
                 // Misc updates -------------------------------------------------------------------------
-                if (hp <= 0) game_mode = GameMode.game_over;
-                prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
-                prev_frame_screen_dim = screen_dim;
-                last_time_ms = rl.GetTime() * 1000;
+                if (game_state.hp <= 0) game_mode = GameMode.game_over;
 
                 var money_change_index: i32 = 0;
-                while (money_change_index < money_change.items.len) : (money_change_index += 1) {
-                    var money_change_entry = &money_change.items[@intCast(u32, money_change_index)];
+                while (money_change_index < game_state.money_change.items.len) : (money_change_index += 1) {
+                    var money_change_entry = &game_state.money_change.items[@intCast(u32, money_change_index)];
                     money_change_entry.d_pos.y += 1;
                     if (money_change_entry.d_pos.y > 40) {
-                        _ = money_change.orderedRemove(@intCast(u32, money_change_index));
+                        _ = game_state.money_change.orderedRemove(@intCast(u32, money_change_index));
                         money_change_index -= 1;
                     }
                 }
                 var hp_change_index: i32 = 0;
-                while (hp_change_index < hp_change.items.len) : (hp_change_index += 1) {
-                    var hp_change_entry = &hp_change.items[@intCast(u32, hp_change_index)];
+                while (hp_change_index < game_state.hp_change.items.len) : (hp_change_index += 1) {
+                    var hp_change_entry = &game_state.hp_change.items[@intCast(u32, hp_change_index)];
                     hp_change_entry.d_pos.y += 1;
                     if (hp_change_entry.d_pos.y > 40) {
-                        _ = hp_change.orderedRemove(@intCast(u32, hp_change_index));
+                        _ = game_state.hp_change.orderedRemove(@intCast(u32, hp_change_index));
                         hp_change_index -= 1;
                     }
                 }
 
+                prev_frame_input.l_mouse_button_is_down = rl.IsMouseButtonDown(rl.MouseButton.MOUSE_BUTTON_LEFT);
+                prev_frame_screen_dim = screen_dim;
+                last_time_ms = rl.GetTime() * 1000;
+
                 // Render -------------------------------------------------------------------------
                 rl.BeginDrawing();
                 drawBackground(screen_dim, bg_offset);
-                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, selected_tower, tower_index_being_placed);
-                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &towers, &alive_enemies, &projectiles, selected_tile_x, selected_tile_y, tower_index_being_placed, tba_anim_frame);
+                drawBoard(&board_map, &tileset, selected_tile_x, selected_tile_y, game_state.selected_tower, game_state.tower_index_being_placed);
+                try drawSprites(&fba, &tileset, debug_hit_boxes, debug_projectile, &game_state.towers, &game_state.alive_enemies, &game_state.dead_enemies, &game_state.projectiles, selected_tile_x, selected_tile_y, game_state.tower_index_being_placed, tba_anim_frame);
 
                 rl.DrawRectangleRec(buy_area_rec, color_off_white);
                 var row_index: u32 = 0;
@@ -1394,7 +1453,7 @@ pub fn main() !void {
                             .width = tower_buy_item_dim.x,
                             .height = tower_buy_item_dim.y,
                         };
-                        const tint = if (@intCast(i32, tower_data.cost) > money) rl.GRAY else rl.WHITE;
+                        const tint = if (@intCast(i32, tower_data.cost) > game_state.money) rl.GRAY else rl.WHITE;
                         rl.DrawTexturePro(tileset.tex, source_rect, tower_buy_item_rec, .{ .x = 0, .y = 0 }, 0, tint);
                         rl.DrawRectangleLinesEx(tower_buy_item_rec, 2, color_off_black);
 
@@ -1428,10 +1487,10 @@ pub fn main() !void {
                     }
                 }
 
-                const round_start_button_tint = if (round_in_progress) rl.GRAY else rl.WHITE;
+                const round_start_button_tint = if (game_state.round_in_progress) rl.GRAY else rl.WHITE;
                 drawTile(&tileset, tileset.tile_name_to_id.get(hashString("play_button")).?, rl.Vector2{ .x = round_start_rec.x, .y = round_start_rec.y }, initial_scale_factor, round_start_button_tint);
-                try drawStatusBar(&font, &money_change, &hp_change);
-                try drawDebugTextInfo(&font, &towers, &projectiles, selected_tile_pos, screen_dim, debug_text_info);
+                try drawStatusBar(&font, &tileset, game_state.money, game_state.hp, &game_state.money_change, &game_state.hp_change);
+                try drawDebugTextInfo(&font, &game_state.towers, &game_state.projectiles, selected_tile_pos, screen_dim, debug_text_info);
                 drawDebugOrigin(screen_mid, debug_origin);
                 rl.EndDrawing();
             },

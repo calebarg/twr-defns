@@ -1,5 +1,5 @@
 {"round_spawn_data": [
-    [{"kind": 0, "spawn_count": 30, "time_between_spawns_ms": 500}],
+    [{"kind": 0, "spawn_count": 30, "time_between_spawns_ms": 1000}],
     [{"kind": 0, "spawn_count": 60, "time_between_spawns_ms": 500}],
     [{"kind": 0, "spawn_count": 120, "time_between_spawns_ms": 250}],
     [{"kind": 0, "spawn_count": 250, "time_between_spawns_ms": 100}]
