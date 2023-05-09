@@ -1,10 +1,5 @@
-// FIXME(caleb):
-// *Play button occasionally needs to be pressed twice.
-
 // TODO(caleb):
 // ========================
-// *README ( how to play section )
-
 // *More towers
 // *More enemies
 // *Tower upgrades
@@ -56,7 +51,7 @@ const GameState = struct {
     hp_change: ArrayList(StatusChangeEntry),
 
     pub fn reset(self: *GameState) void {
-        self.money = 150;
+        self.money = 200;
         self.hp = 200;
         self.round = 0;
         self.selected_tower = null;
@@ -177,9 +172,8 @@ const Enemy = struct {
     fn shiftColliders(self: *Enemy) void {
         var y_offset: f32 = sprite_height * scale_factor / 2;
         for (self.colliders) |*collider| {
-            // TODO(caleb): Convention for sprite offsets when drawing? Possibly read this
-            // in alongside other json data.
 
+            // TODO(caleb): Read sprite offsets from tileset lookup.
             const enemy_screen_space_pos = isoProject(self.pos.x, self.pos.y, 1);
             const collider_screen_space_pos = rl.Vector2{
                 .x = enemy_screen_space_pos.x + (sprite_width * scale_factor - collider.width * scale_factor) / 2,
@@ -193,13 +187,25 @@ const Enemy = struct {
         }
     }
     fn initColliders(self: *Enemy) void {
-        // TODO(caleb): Get hitbox info from tileset json.
+        // TODO(caleb): Get hitbox info from a tileset lookup.
+        for (self.colliders) |*collider| {
+            collider.width = 0;
+            collider.height = 0;
+        }
+        switch (self.kind) {
+            .gremlin_wiz_guy => {
+                self.colliders[0].width = 12; // ~Head
+                self.colliders[0].height = 8;
 
-        self.colliders[0].width = 12; // ~Head
-        self.colliders[0].height = 8;
-
-        self.colliders[1].width = 14; // ~Body
-        self.colliders[1].height = 8;
+                self.colliders[1].width = 14; // ~Body
+                self.colliders[1].height = 8;
+            },
+            .slime => {
+                self.colliders[0].width = 16; // ~Body
+                self.colliders[0].height = 15;
+            },
+            else => unreachable,
+        }
 
         self.shiftColliders();
     }
@@ -236,15 +242,15 @@ var towers_data = [_]TowerData{
         .tile_id = undefined,
         .fire_rate = 1.0,
         .fire_speed = 10,
-        .cost = 100,
+        .cost = 200,
     },
     TowerData{ // bank
-        .damage = 10,
+        .damage = 20,
         .range = 1,
         .tile_id = undefined,
         .fire_rate = 0.2,
         .fire_speed = 10,
-        .cost = 150,
+        .cost = 300,
     },
 };
 
@@ -1163,23 +1169,25 @@ pub fn main() !void {
                                 }
                             },
                             .bank => {
-                                var tile_space_start = rl.Vector2{ .x = @intToFloat(f32, tower.tile_x), .y = @intToFloat(f32, tower.tile_y) };
-                                var screen_space_start = isoProject(tile_space_start.x, tile_space_start.y, 1);
-                                screen_space_start.x += sprite_width * scale_factor / 2;
-                                screen_space_start.y += sprite_height * scale_factor / 2;
-                                tile_space_start = isoProjectInverted(screen_space_start.x, screen_space_start.y, 1);
+                                if (rng.random().uintLessThan(u8, 2) == 1) { // 1 in 3 chance to gen a coin
+                                    var tile_space_start = rl.Vector2{ .x = @intToFloat(f32, tower.tile_x), .y = @intToFloat(f32, tower.tile_y) };
+                                    var screen_space_start = isoProject(tile_space_start.x, tile_space_start.y, 1);
+                                    screen_space_start.x += sprite_width * scale_factor / 2;
+                                    screen_space_start.y += sprite_height * scale_factor / 2;
+                                    tile_space_start = isoProjectInverted(screen_space_start.x, screen_space_start.y, 1);
 
-                                const tile_space_target = rlm.Vector2Add(tile_space_start, rl.Vector2{ .x = @cos(time_in_seconds), .y = @sin(time_in_seconds) });
-                                const new_projectile = Projectile{
-                                    .kind = ProjectileKind.coin,
-                                    .direction = rlm.Vector2Normalize(rlm.Vector2Subtract(tile_space_target, tile_space_start)),
-                                    .target = tile_space_target,
-                                    .start = tile_space_start,
-                                    .pos = tile_space_start,
-                                    .speed = @intToFloat(f32, rng.random().intRangeAtMost(u8, @floatToInt(u8, @round(tower.fire_speed)), @floatToInt(u8, tower.fire_speed) + 3)) / target_fps,
-                                    .damage = towers_data[@enumToInt(tower.kind)].damage,
-                                };
-                                try game_state.projectiles.append(new_projectile);
+                                    const tile_space_target = rlm.Vector2Add(tile_space_start, rl.Vector2{ .x = @cos(time_in_seconds), .y = @sin(time_in_seconds) });
+                                    const new_projectile = Projectile{
+                                        .kind = ProjectileKind.coin,
+                                        .direction = rlm.Vector2Normalize(rlm.Vector2Subtract(tile_space_target, tile_space_start)),
+                                        .target = tile_space_target,
+                                        .start = tile_space_start,
+                                        .pos = tile_space_start,
+                                        .speed = @intToFloat(f32, rng.random().intRangeAtMost(u8, @floatToInt(u8, @round(tower.fire_speed)), @floatToInt(u8, tower.fire_speed) + 3)) / target_fps,
+                                        .damage = towers_data[@enumToInt(tower.kind)].damage,
+                                    };
+                                    try game_state.projectiles.append(new_projectile);
+                                }
                             },
                         }
                     }
@@ -1407,6 +1415,10 @@ pub fn main() !void {
                         hot_button_index = -1;
                         game_state.round_in_progress = true;
                         game_state.round += 1;
+                        for (game_state.round_gsd) |*gsd_entry| {
+                            gsd_entry.time_between_spawns_ms = 0;
+                            gsd_entry.spawn_count = 0;
+                        }
                     }
                 } else if (game_state.round_in_progress) {
                     std.debug.assert(game_state.round > 0);
