@@ -1,5 +1,5 @@
 # twr-defns
-An isometric tower defense game written in zig.
+An isometric tower defense game written in zig + raylib.
 
 ![asdf](screenshots/screenshot_1.png)
 
@@ -21,3 +21,11 @@ An isometric tower defense game written in zig.
 
 ### Advancing rounds
 * If a round is not currently in progress click the play button in the bottom right to send the next wave of enemies.
+
+## Build
+### Requirements:
+* Zig v0.10.1
+
+### Instructions:
+* ```git submodule update --init --recursive```
+* ```zig build``` 
