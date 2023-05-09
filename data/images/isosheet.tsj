@@ -31,15 +31,7 @@
         }, 
         {
          "id":80,
-         "type":"tower"
-        }, 
-        {
-         "id":96,
-         "type":"tower"
-        }, 
-        {
-         "id":112,
-         "type":"tower"
+         "type":"enemy"
         }, 
         {
          "id":128,
@@ -72,6 +64,10 @@
         {
          "id":150,
          "type":"money_icon"
+        }, 
+        {
+         "id":151,
+         "type":"round_icon"
         }],
  "tilewidth":32,
  "type":"tileset",

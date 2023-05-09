@@ -1,6 +1,22 @@
 {"round_spawn_data": [
-    [{"kind": 0, "spawn_count": 30, "time_between_spawns_ms": 1000}],
-    [{"kind": 0, "spawn_count": 60, "time_between_spawns_ms": 500}],
-    [{"kind": 0, "spawn_count": 120, "time_between_spawns_ms": 250}],
-    [{"kind": 0, "spawn_count": 250, "time_between_spawns_ms": 100}]
+    [{"kind": 1, "spawn_count": 30, "time_between_spawns_ms": 1000}],
+    [{"kind": 1, "spawn_count": 40, "time_between_spawns_ms": 750}],
+    [{"kind": 1, "spawn_count": 60, "time_between_spawns_ms": 500}],
+    [{"kind": 1, "spawn_count": 120, "time_between_spawns_ms": 500}, {"kind": 0, "spawn_count": 5, "time_between_spawns_ms": 5000} ],
+    [{"kind": 1, "spawn_count": 120, "time_between_spawns_ms": 500}, {"kind": 0, "spawn_count": 10, "time_between_spawns_ms": 2500} ],
+    [{"kind": 1, "spawn_count": 240, "time_between_spawns_ms": 500}, {"kind": 0, "spawn_count": 20, "time_between_spawns_ms": 1500} ],
+    [{"kind": 1, "spawn_count": 500, "time_between_spawns_ms": 250}, {"kind": 0, "spawn_count": 50, "time_between_spawns_ms": 500} ],
+    [{"kind": 1, "spawn_count": 1000, "time_between_spawns_ms": 100}, {"kind": 0, "spawn_count": 100, "time_between_spawns_ms": 250} ],
+    [{"kind": 1, "spawn_count": 1000, "time_between_spawns_ms": 100}, {"kind": 0, "spawn_count": 100, "time_between_spawns_ms": 250} ],
+    [{"kind": 1, "spawn_count": 500, "time_between_spawns_ms": 100}, {"kind": 0, "spawn_count": 100, "time_between_spawns_ms": 250} ],
+    [{"kind": 1, "spawn_count": 500, "time_between_spawns_ms": 100}, {"kind": 0, "spawn_count": 200, "time_between_spawns_ms": 250} ],
+    [{"kind": 1, "spawn_count": 500, "time_between_spawns_ms": 100}, {"kind": 0, "spawn_count": 200, "time_between_spawns_ms": 250} ],
+    [{"kind": 0, "spawn_count": 400, "time_between_spawns_ms": 150} ],
+    [{"kind": 0, "spawn_count": 800, "time_between_spawns_ms": 100} ],
+    [{"kind": 1, "spawn_count": 1000, "time_between_spawns_ms": 75}, {"kind": 0, "spawn_count": 1600, "time_between_spawns_ms": 100} ],
+    [{"kind": 1, "spawn_count": 1000, "time_between_spawns_ms": 75}, {"kind": 0, "spawn_count": 3200, "time_between_spawns_ms": 100} ],
+    [{"kind": 1, "spawn_count": 1000, "time_between_spawns_ms": 75}, {"kind": 0, "spawn_count": 3200, "time_between_spawns_ms": 50} ],
+    [{"kind": 1, "spawn_count": 2000, "time_between_spawns_ms": 50}, {"kind": 0, "spawn_count": 4000, "time_between_spawns_ms": 50} ],
+    [{"kind": 1, "spawn_count": 8000, "time_between_spawns_ms": 25}, {"kind": 0, "spawn_count": 4000, "time_between_spawns_ms": 50} ],
+    [{"kind": 1, "spawn_count": 10000, "time_between_spawns_ms": 25}, {"kind": 0, "spawn_count": 8000, "time_between_spawns_ms": 50} ]
 ]}
